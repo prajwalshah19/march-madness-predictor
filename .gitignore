@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+*.egg
+.venv/
+venv/
+
+# Data files (user downloads separately)
+data/kaggle/*.csv
+data/market/*.json
+
+# Output files
+output/*.csv
+output/*.json
+output/*.txt
