@@ -162,14 +162,39 @@ def _get_pred(preds: pd.DataFrame, team_a: int, team_b: int) -> float:
     return p if team_a == lo else (1 - p)
 
 
+# First Four results: team IDs that WON their play-in game and advanced.
+# Set by the user; losers are excluded from the bracket.
+FIRST_FOUR_WINNERS: set[int] = {
+    1275,  # Miami OH (beat SMU, Y11)
+    1400,  # Texas (beat NC State, Z11)
+    1341,  # Prairie View (beat Lehigh, X16)
+    1224,  # Howard (beat UMBC, Y16)
+}
+FIRST_FOUR_LOSERS: set[int] = {
+    1374,  # SMU
+    1301,  # NC State
+    1250,  # Lehigh
+    1420,  # UMBC
+}
+
+
 def _build_bracket(seeds: pd.DataFrame, gender: str) -> dict[str, dict[int, int]]:
-    """Build region -> {seed_num: team_id} mapping."""
+    """Build region -> {seed_num: team_id} mapping.
+
+    Excludes First Four losers so only winners occupy play-in slots.
+    """
     gender_seeds = seeds[seeds["Gender"] == gender]
     bracket: dict[str, dict[int, int]] = {}
     for _, row in gender_seeds.iterrows():
         region = str(row["Region"])
         sn = int(row["SeedNum"])
         tid = int(row["TeamID"])
+        play_in = str(row.get("PlayIn", ""))
+
+        # Skip First Four losers
+        if tid in FIRST_FOUR_LOSERS:
+            continue
+
         bracket.setdefault(region, {})[sn] = tid
     return bracket
 
