@@ -735,6 +735,235 @@ def find_upsets(
     print()
 
 
+# ── Bracket command ──────────────────────────────────────────────
+
+def _simulate_region_chalk(
+    preds: pd.DataFrame,
+    region_teams: dict[int, int],
+    matcher: TeamMatcher,
+) -> list[list[tuple[int, int, str, float]]]:
+    """Simulate a region bracket picking the favorite at each round.
+
+    Returns list of rounds, each a list of (seed, team_id, name, win_prob) tuples.
+    """
+    # R64
+    r64_results = []
+    for sa, sb in R64_PAIRINGS:
+        ta = region_teams.get(sa, 0)
+        tb = region_teams.get(sb, 0)
+        if ta == 0 or tb == 0:
+            winner_seed = sa if ta else sb
+            winner_id = ta or tb
+            r64_results.append((winner_seed, winner_id, matcher.get_name(winner_id), 0.5))
+            continue
+        p = _get_pred(preds, ta, tb)
+        if p >= 0.5:
+            r64_results.append((sa, ta, matcher.get_name(ta), p))
+        else:
+            r64_results.append((sb, tb, matcher.get_name(tb), 1 - p))
+
+    rounds = [
+        [(s, tid, name, wp) for s, tid, name, wp in r64_results]
+    ]
+
+    # R32, S16, E8 — pair adjacent winners
+    current = r64_results
+    while len(current) > 1:
+        next_round = []
+        for i in range(0, len(current), 2):
+            sa, ta, na, _ = current[i]
+            sb, tb, nb, _ = current[i + 1]
+            p = _get_pred(preds, ta, tb) if ta and tb else 0.5
+            if p >= 0.5:
+                next_round.append((sa, ta, na, p))
+            else:
+                next_round.append((sb, tb, nb, 1 - p))
+        rounds.append(next_round)
+        current = next_round
+
+    return rounds
+
+
+def _fmt_team(seed: int, name: str, width: int = 20) -> str:
+    """Format team as '(1) Duke' padded to width."""
+    s = f"({seed:>2}) {name}"
+    return s[:width].ljust(width)
+
+
+def show_bracket(
+    matcher: TeamMatcher,
+    preds: pd.DataFrame,
+    seeds: pd.DataFrame,
+    slots: pd.DataFrame,
+    futures_signals: pd.DataFrame,
+    gender: str,
+) -> None:
+    """Generate and display a visual ASCII bracket."""
+    bracket = _build_bracket(seeds, gender)
+    if not bracket:
+        print(f"  No bracket found")
+        return
+
+    f4_pairings = _get_f4_pairings(slots, gender)
+    label = "Men's" if gender == "M" else "Women's"
+
+    print()
+    print(f"  {'=' * 78}")
+    print(f"  {label} NCAA Tournament Bracket — {CFG.TARGET_SEASON} (Model Picks)")
+    print(f"  {'=' * 78}")
+
+    # Simulate each region
+    region_champions: dict[str, tuple[int, int, str]] = {}  # region -> (seed, tid, name)
+    region_order = sorted(bracket.keys())
+
+    for region in region_order:
+        region_teams = bracket[region]
+        rounds = _simulate_region_chalk(preds, region_teams, matcher)
+
+        # R64 results (8 games), R32 (4), S16 (2), E8 (1)
+        r64 = rounds[0]  # 8 winners
+        r32 = rounds[1] if len(rounds) > 1 else []  # 4 winners
+        s16 = rounds[2] if len(rounds) > 2 else []  # 2 winners
+        e8 = rounds[3] if len(rounds) > 3 else []   # 1 winner (region champ)
+
+        if e8:
+            cs, ct, cn, _ = e8[0]
+            region_champions[region] = (cs, ct, cn)
+
+        W = 20  # team name column width
+
+        print()
+        print(f"  ┌─── Region {region} ────────────────────────────────────────────────────┐")
+        print(f"  │{'R64':<{W+2}}  {'R32':<{W+2}}  {'Sweet 16':<{W+2}}  {'Elite 8':<{W+2}} │")
+        print(f"  │{'':{W+2}}  {'':{W+2}}  {'':{W+2}}  {'':{W+2}} │")
+
+        # Build 8-line display: each line shows R64 winner, and where applicable R32/S16/E8
+        for i in range(8):
+            r64_str = _fmt_team(r64[i][0], r64[i][2], W)
+            wp64 = f"{r64[i][3]:.0%}"
+
+            r32_str = ""
+            wp32 = ""
+            if i % 2 == 0 and i // 2 < len(r32):
+                r32_str = _fmt_team(r32[i // 2][0], r32[i // 2][2], W)
+                wp32 = f"{r32[i // 2][3]:.0%}"
+
+            s16_str = ""
+            wp16 = ""
+            if i % 4 == 0 and i // 4 < len(s16):
+                s16_str = _fmt_team(s16[i // 4][0], s16[i // 4][2], W)
+                wp16 = f"{s16[i // 4][3]:.0%}"
+
+            e8_str = ""
+            wp_e8 = ""
+            if i == 0 and e8:
+                e8_str = _fmt_team(e8[0][0], e8[0][2], W)
+                wp_e8 = f"{e8[0][3]:.0%}"
+
+            # Connectors
+            r64_col = f"{r64_str} {wp64:>4}"
+            r32_col = f"{r32_str} {wp32:>4}" if r32_str else " " * (W + 5)
+            s16_col = f"{s16_str} {wp16:>4}" if s16_str else " " * (W + 5)
+            e8_col = f"{e8_str} {wp_e8:>4}" if e8_str else " " * (W + 5)
+
+            # Draw bracket lines
+            r64_conn = "─┐" if i % 2 == 0 else " │"
+            r32_conn = "─┐" if i % 2 == 0 and r32_str else ("─┘" if i % 2 == 1 and i // 2 < len(r32) else "  ")
+            s16_conn = "─┐" if i % 4 == 0 and s16_str else ("─┘" if i == 3 and len(s16) > 0 else ("─┘" if i == 7 and len(s16) > 1 else "  "))
+            e8_conn = "──" if i == 0 and e8_str else "  "
+
+            # Simplified: just show the grid
+            line = f"  │ {r64_str} {wp64:>3}"
+            if i % 2 == 0 and i // 2 < len(r32):
+                line += f"  {r32_str} {wp32:>3}"
+            else:
+                line += f"  {'':>{W + 4}}"
+            if i % 4 == 0 and i // 4 < len(s16):
+                line += f"  {s16_str} {wp16:>3}"
+            else:
+                line += f"  {'':>{W + 4}}"
+            if i == 0 and e8:
+                line += f"  {e8_str} {wp_e8:>3}"
+
+            # Trim trailing spaces and add box border
+            print(f"{line.rstrip()}")
+
+        print(f"  └{'─' * 77}┘")
+
+    # Final Four
+    print()
+    print(f"  ┌─── Final Four ──────────────────────────────────────────────────────────┐")
+
+    for r1, r2 in f4_pairings:
+        c1 = region_champions.get(r1)
+        c2 = region_champions.get(r2)
+        if c1 and c2:
+            p = _get_pred(preds, c1[1], c2[1])
+            if p >= 0.5:
+                winner = c1
+                wp = p
+            else:
+                winner = c2
+                wp = 1 - p
+            print(f"  │  {_fmt_team(c1[0], c1[2])} [{r1}]  vs  {_fmt_team(c2[0], c2[2])} [{r2}]")
+            print(f"  │  Winner: {_fmt_team(winner[0], winner[2])} ({wp:.0%})")
+            print(f"  │")
+
+    # Championship
+    f4_winners = []
+    for r1, r2 in f4_pairings:
+        c1 = region_champions.get(r1)
+        c2 = region_champions.get(r2)
+        if c1 and c2:
+            p = _get_pred(preds, c1[1], c2[1])
+            f4_winners.append(c1 if p >= 0.5 else c2)
+
+    if len(f4_winners) == 2:
+        a, b = f4_winners
+        p = _get_pred(preds, a[1], b[1])
+        if p >= 0.5:
+            champ, wp = a, p
+        else:
+            champ, wp = b, 1 - p
+        print(f"  │  Championship:")
+        print(f"  │  {_fmt_team(a[0], a[2])}  vs  {_fmt_team(b[0], b[2])}")
+        print(f"  │")
+        fut = get_futures(futures_signals, champ[1])
+        market_str = f"  (Kalshi: {fut['ChampionshipProb']:.0%})" if fut else ""
+        print(f"  │  Champion: {_fmt_team(champ[0], champ[2])} ({wp:.0%}){market_str}")
+
+    print(f"  └{'─' * 77}┘")
+
+    # Advancement table
+    print()
+    print(f"  ┌─── Advancement Probabilities (Top 16) ──────────────────────────────────┐")
+    print(f"  │  {'Team':<25} {'Rgn':>3}  {'R32':>5} {'S16':>5} {'E8':>5} {'F4':>5} {'Chmp':>5} │")
+    print(f"  │  {'─' * 55}  │")
+
+    # Compute all region probs
+    all_probs: list[tuple[str, int, int, str, dict]] = []
+    for region in region_order:
+        rteams = bracket[region]
+        rprobs = compute_region_probs(preds, rteams, matcher)
+        for tid, probs in rprobs.items():
+            s = get_seed(seeds, tid, gender) or 99
+            all_probs.append((region, s, tid, matcher.get_name(tid), probs))
+
+    all_probs.sort(key=lambda x: x[4].get("F4", 0), reverse=True)
+
+    for region, s, tid, name, probs in all_probs[:16]:
+        team_str = f"({s:>2}) {name}"
+        print(f"  │  {team_str:<25} {region:>3}"
+              f"  {probs.get('R32', 0):>4.0%}"
+              f"  {probs.get('S16', 0):>4.0%}"
+              f"  {probs.get('E8', 0):>4.0%}"
+              f"  {probs.get('F4', 0):>4.0%}"
+              f"  {'':>5} │")
+
+    print(f"  └{'─' * 77}┘")
+    print()
+
+
 # ── CLI entry point ──────────────────────────────────────────────
 
 def main() -> None:
@@ -763,10 +992,19 @@ def main() -> None:
         matcher, ratings, preds, seeds, slots, market_signals, futures_signals = load_data()
         show_path(matcher, preds, seeds, slots, futures_signals, args.team, args.gender)
 
+    elif cmd == "bracket":
+        sub = argparse.ArgumentParser(usage="mm-predict bracket [-g M|W]")
+        sub.add_argument("_cmd", help=argparse.SUPPRESS)
+        sub.add_argument("-g", "--gender", default="M", choices=["M", "W"])
+        args = sub.parse_args()
+
+        matcher, ratings, preds, seeds, slots, market_signals, futures_signals = load_data()
+        show_bracket(matcher, preds, seeds, slots, futures_signals, args.gender)
+
     else:
         parser = argparse.ArgumentParser(
             description="March Madness matchup predictor",
-            usage="mm-predict {TEAM1 TEAM2 | path TEAM | upsets [SEED]}",
+            usage="mm-predict {TEAM1 TEAM2 | path TEAM | upsets [SEED] | bracket}",
         )
         parser.add_argument("team1", help="First team name")
         parser.add_argument("team2", help="Second team name")
