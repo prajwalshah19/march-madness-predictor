@@ -160,6 +160,11 @@ def _default_ablation_sets(team_ratings: pd.DataFrame) -> dict[str, list[str]]:
         prev_best = list(sets[max(sets.keys())]) if sets else ["elo_diff", "seed_diff"]
         sets["with_late_ft"] = prev_best + ["lateftpct_diff"]
 
+    # Market log-odds from Massey composite (historical proxy for market signal)
+    if "MasseyLogOdds" in team_ratings.columns and (team_ratings["MasseyLogOdds"] != 0).any():
+        prev_best = list(sets[max(sets.keys())]) if sets else ["elo_diff", "seed_diff"]
+        sets["with_market_logodds"] = prev_best + ["market_logodds_diff"]
+
     return sets
 
 

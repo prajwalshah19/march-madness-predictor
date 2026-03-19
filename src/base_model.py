@@ -131,6 +131,12 @@ def _build_matchup_features(
             else:
                 row[col] = val_a - val_b
 
+    # Market log-odds differential (Massey composite proxy or actual market data)
+    if "market_logodds_diff" in features:
+        lo_a = r_a.get("MasseyLogOdds", 0)
+        lo_b = r_b.get("MasseyLogOdds", 0)
+        row["market_logodds_diff"] = lo_a - lo_b
+
     return row
 
 
@@ -266,6 +272,8 @@ class MarchMadnessModel:
                     row_vals.append(r_a.get("OffRebRate", 0) - r_b.get("OffRebRate", 0))
                 elif feat == "lateftpct_diff":
                     row_vals.append(r_a.get("LateFTPct", 0) - r_b.get("LateFTPct", 0))
+                elif feat == "market_logodds_diff":
+                    row_vals.append(r_a.get("MasseyLogOdds", 0) - r_b.get("MasseyLogOdds", 0))
                 else:
                     row_vals.append(0.0)
             feature_rows.append(row_vals)

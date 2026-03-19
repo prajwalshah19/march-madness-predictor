@@ -403,6 +403,65 @@ def _process_polymarket_market(
         }
 
 
+def calibrate_futures_scale(
+    matchup_signals: pd.DataFrame,
+    futures_signals: pd.DataFrame,
+    scale_factors: list[float] | None = None,
+) -> float:
+    """Find optimal scale factor for futures-to-matchup probability conversion.
+
+    Uses direct matchup markets as ground truth to calibrate the logistic
+    scale factor applied to log-odds differentials.
+    """
+    if scale_factors is None:
+        scale_factors = [0.2, 0.3, 0.4, 0.5, 0.6, 0.8]
+
+    if matchup_signals.empty or futures_signals.empty:
+        return 0.3
+
+    # Build futures log-odds lookup
+    resolved = futures_signals[futures_signals["TeamID"] != 0]
+    if resolved.empty:
+        return 0.3
+    best_idx = resolved.groupby("TeamID")["MarketConfidence"].idxmax()
+    best = resolved.loc[best_idx]
+    lo_dict = dict(zip(best["TeamID"].astype(int), best["LogOdds"].astype(float)))
+
+    # Find matchups where both teams have futures data
+    valid = matchup_signals[
+        (matchup_signals["TeamA"] != 0) & (matchup_signals["TeamB"] != 0)
+    ]
+    if valid.empty:
+        return 0.3
+
+    pairs_diff = []
+    pairs_actual = []
+    for _, row in valid.iterrows():
+        ta, tb = int(row["TeamA"]), int(row["TeamB"])
+        if ta in lo_dict and tb in lo_dict:
+            pairs_diff.append(lo_dict[ta] - lo_dict[tb])
+            pairs_actual.append(float(row["MarketProb"]))
+
+    if len(pairs_diff) < 3:
+        return 0.3
+
+    diffs = np.array(pairs_diff)
+    actuals = np.array(pairs_actual)
+
+    best_scale = 0.3
+    best_rmse = float("inf")
+    for sf in scale_factors:
+        derived = 1.0 / (1.0 + np.exp(-sf * diffs))
+        rmse = float(np.sqrt(np.mean((derived - actuals) ** 2)))
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_scale = sf
+
+    print(f"  Calibrated futures scale factor: {best_scale} "
+          f"(RMSE {best_rmse:.4f} on {len(pairs_diff)} matchups)")
+    return best_scale
+
+
 # ── Shared helpers ──────────────────────────────────────────────
 
 

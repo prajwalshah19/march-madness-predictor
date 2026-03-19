@@ -29,7 +29,7 @@ from src.config import CFG
 from src.data_loader import DataLoader
 from src.efficiency import compute_efficiency
 from src.elo import compute_elo
-from src.features import compute_tournament_features
+from src.features import compute_massey_logodds, compute_tournament_features
 from src.market_features import analyze_order_books
 from src.market_scraper import fetch_market_data, market_data_available
 from src.submission import generate_submission
@@ -102,6 +102,11 @@ def main() -> None:
         print(f"\nSTAGES 2-4: Loading cached team ratings from {TEAM_RATINGS_PATH}")
         team_ratings = pd.read_csv(TEAM_RATINGS_PATH)
         print(f"  {len(team_ratings)} team-season rows loaded")
+        # Ensure MasseyLogOdds is present (may not be in older cached ratings)
+        if "MasseyLogOdds" not in team_ratings.columns:
+            print("  Adding Massey composite log-odds...")
+            team_ratings = compute_massey_logodds(loader, team_ratings)
+            team_ratings.to_csv(TEAM_RATINGS_PATH, index=False)
     else:
         print("\nSTAGE 2: Computing Elo ratings...")
         with _stage_timer("elo"):
@@ -129,6 +134,10 @@ def main() -> None:
         print("\nSTAGE 4: Computing tournament-specific features...")
         with _stage_timer("features"):
             team_ratings = compute_tournament_features(loader, team_ratings)
+
+        print("\nSTAGE 4b: Computing Massey composite log-odds...")
+        with _stage_timer("massey"):
+            team_ratings = compute_massey_logodds(loader, team_ratings)
 
         team_ratings.to_csv(TEAM_RATINGS_PATH, index=False)
         print(f"  Team ratings saved to {TEAM_RATINGS_PATH}")

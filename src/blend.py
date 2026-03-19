@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import CFG
+from src.market_features import calibrate_futures_scale
 
 
 def blend_predictions(
@@ -71,6 +72,11 @@ def blend_predictions(
                     source[i] = "matchup"
                     direct_count += 1
 
+    # Improvement 2: Calibrate futures scale factor using matchup markets as ground truth
+    futures_scale = 0.3
+    if has_matchup and has_futures:
+        futures_scale = calibrate_futures_scale(market_signals, futures_signals)
+
     # Priority 2: Futures-derived probabilities (vectorized)
     futures_count = 0
     if has_futures:
@@ -94,7 +100,7 @@ def blend_predictions(
                 both_exist = futures_mask & ~np.isnan(lo_a) & ~np.isnan(lo_b)
                 if both_exist.any():
                     diff = lo_a[both_exist] - lo_b[both_exist]
-                    prob = 1.0 / (1.0 + np.exp(-0.3 * diff))
+                    prob = 1.0 / (1.0 + np.exp(-futures_scale * diff))
                     market_prob[both_exist] = np.clip(prob, 0.05, 0.95)
                     confidence[both_exist] = 0.5 * (conf_a[both_exist] + conf_b[both_exist]) * 0.6
                     source[both_exist] = "futures"
@@ -105,10 +111,16 @@ def blend_predictions(
     is_futures = source == "futures"
     is_matchup = source == "matchup"
     hi_conf = confidence >= 0.5
+    base_pred = result["BasePred"].values
 
     w_base = np.full(n, 1.0)
-    # Futures: always conservative
-    w_base[is_futures] = CFG.BLEND_LOW_CONFIDENCE_BASE
+
+    # Improvement 3: Confidence-adaptive futures weighting
+    # Market weight ranges from 0.15 (low conf) to 0.35 (high conf)
+    if is_futures.any():
+        w_market_futures = 0.15 + 0.20 * confidence[is_futures]
+        w_base[is_futures] = 1.0 - w_market_futures
+
     # High-confidence matchup
     matchup_hi = is_matchup & hi_conf
     w_base[matchup_hi] = base_weight - 0.1 * (confidence[matchup_hi] - 0.5)
@@ -116,10 +128,22 @@ def blend_predictions(
     matchup_lo = is_matchup & ~hi_conf
     w_base[matchup_lo] = CFG.BLEND_LOW_CONFIDENCE_BASE
 
+    # Improvement 5: Very high-confidence matchup override (conf > 0.9)
+    # Liquid, well-priced markets — trust them more aggressively
+    very_hi_matchup = is_matchup & (confidence > 0.9)
+    w_base[very_hi_matchup] = 0.35
+
     # Whale boost (matchup only)
     whale_active = is_matchup & (np.abs(whale_signal) > 0.5)
     whale_boost = 0.05 * np.abs(whale_signal[whale_active])
     w_base[whale_active] -= whale_boost
+
+    # Improvement 4: Disagreement-based weight shifting
+    # When market and model disagree by >10%, boost market weight
+    disagreement = np.abs(base_pred - market_prob)
+    has_disagreement = has_market & (disagreement > 0.10)
+    if has_disagreement.any():
+        w_base[has_disagreement] -= 0.10 * (disagreement[has_disagreement] - 0.10)
 
     # Clip weights
     w_base = np.clip(w_base, 0.1, 0.95)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from src.config import CFG
@@ -135,3 +136,56 @@ def _compute_team_features(team_id: int, season_games: pd.DataFrame) -> dict:
         "OffRebRate": round(off_reb_rate, 4),
         "LateFTPct": round(late_ft_pct, 4),
     }
+
+
+def compute_massey_logodds(
+    loader: DataLoader,
+    team_ratings: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compute Massey composite log-odds as a market strength proxy.
+
+    Averages ordinal rankings across all ranking systems near tournament time,
+    then converts to log-odds space. Massey aggregates 100+ ranking systems,
+    serving as a historical proxy for market-implied team strength.
+    """
+    try:
+        massey = loader.get_massey()
+    except KeyError:
+        print("  WARNING: Massey ordinals not available, skipping")
+        team_ratings = team_ratings.copy()
+        team_ratings["MasseyLogOdds"] = 0.0
+        return team_ratings
+
+    # Use rankings from the latest available day per season (near tournament)
+    latest_day = massey.groupby("Season")["RankingDayNum"].max().reset_index()
+    latest_day.columns = ["Season", "LatestDay"]
+    massey = massey.merge(latest_day, on="Season")
+    massey = massey[massey["RankingDayNum"] == massey["LatestDay"]]
+
+    # Composite: average rank across all systems per team per season
+    composite = (
+        massey.groupby(["Season", "TeamID"])["OrdinalRank"]
+        .mean()
+        .reset_index()
+        .rename(columns={"OrdinalRank": "CompositeRank"})
+    )
+
+    # Convert rank to log-odds per season (lower rank = stronger)
+    max_rank = composite.groupby("Season")["CompositeRank"].transform("max")
+    strength = (max_rank - composite["CompositeRank"] + 1) / max_rank
+    strength_clipped = np.clip(strength, 0.01, 0.99)
+    composite["MasseyLogOdds"] = np.log(strength_clipped / (1.0 - strength_clipped))
+
+    # Massey ordinals are men's only (MMasseyOrdinals.csv)
+    composite["Gender"] = "M"
+
+    merged = team_ratings.merge(
+        composite[["Season", "TeamID", "Gender", "MasseyLogOdds"]],
+        on=["Season", "TeamID", "Gender"],
+        how="left",
+    )
+    merged["MasseyLogOdds"] = merged["MasseyLogOdds"].fillna(0.0)
+
+    n_enriched = int((merged["MasseyLogOdds"] != 0).sum())
+    print(f"  Computed Massey composite log-odds for {n_enriched} team-seasons")
+    return merged
