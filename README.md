@@ -2,7 +2,7 @@
 
 A prediction pipeline for the Kaggle March Machine Learning Mania 2026 competition. Combines Elo ratings, efficiency metrics, tournament-specific features, and live Kalshi prediction market data to generate win probabilities for every possible NCAA tournament matchup.
 
-**Current Brier score: 0.1713** (leave-one-season-out CV, 2010-2025)
+**Current Brier score: 0.1711** (leave-one-season-out CV, 2010-2025)
 
 ## Quick Start
 
@@ -36,17 +36,17 @@ Without credentials, the pipeline runs on the base model alone.
 ## Pipeline Overview
 
 ```
-Kaggle CSVs ──> Elo ──> Efficiency ──> Tournament Features ──> Backtest
-                                                                  │
-                                                           Feature Selection
-                                                                  │
-                                                         Train Base Model
-                                                                  │
-                                                        Base Predictions
-                                                                  │
-Kalshi API ──> Market Signals ──────────────────────────> Blend ──> Submission
-                                                                  │
-                                                              Brackets
+Kaggle CSVs ──> Elo ──> Efficiency ──> Tournament Features ──> Massey Log-Odds ──> Backtest
+                                                                                       │
+                                                                                Feature Selection
+                                                                                       │
+                                                                              Train Base Model
+                                                                                       │
+                                                                             Base Predictions
+                                                                                       │
+Kalshi API ──> Market Signals ──> Calibrate Scale Factor ──────────────────> Blend ──> Submission
+                                                                                       │
+                                                                                   Brackets
 ```
 
 Each stage saves artifacts to `output/`. On subsequent runs, cached artifacts are reused automatically. Delete an output file or pass `--fresh` to force recomputation.
@@ -57,7 +57,8 @@ Each stage saves artifacts to `output/`. On subsequent runs, cached artifacts ar
 | 2. Elo ratings | Season-by-season Elo updates | ~10s | Yes |
 | 3. Efficiency | Possession-based adjusted efficiency | ~8min | Yes |
 | 4. Tournament features | 4 box-score-derived features | ~26s | Yes |
-| 5. Backtest | Leave-one-season-out CV, 6 feature sets | ~25min | Yes |
+| 4b. Massey log-odds | Composite ranking → log-odds proxy | ~5s | Yes |
+| 5. Backtest | Leave-one-season-out CV, 7 feature sets | ~30min | Yes |
 | 6. Train base model | Logistic regression + isotonic calibration | ~18s | Yes |
 | 7. Fetch market data | Kalshi API (2100+ markets) | ~2min | Yes |
 | 8. Analyze order books | Team matching, signal extraction | <1s | Yes |
@@ -137,6 +138,26 @@ Four features designed to capture tournament-specific dynamics not reflected in 
 
 If fewer than 5 close games exist for a team, CloseGameTOMargin falls back to overall turnover margin.
 
+### Massey Composite Log-Odds (`src/features.py`)
+
+A market-consensus strength proxy derived from Massey ordinal rankings, which aggregate 100+ independent ranking systems (computer polls, sagarin, KenPom-style ratings, etc.). This serves as a historical proxy for prediction market signal since actual market data (Kalshi, Vegas lines) doesn't exist for 2010-2024 backtesting.
+
+**Computation:**
+1. For each team-season, take rankings from the latest available day (near tournament time)
+2. Average the ordinal rank across all ranking systems to get a composite rank
+3. Convert to log-odds space for the logistic regression:
+
+```
+strength = (max_rank - composite_rank + 1) / max_rank    # [0, 1]
+massey_logodds = log(strength / (1 - strength))           # (-inf, +inf)
+```
+
+The feature `market_logodds_diff = massey_logodds_A - massey_logodds_B` captures "crowd wisdom" signal beyond what our Elo or efficiency metrics provide. The backtest confirmed this feature improves Brier from 0.1713 to 0.1711.
+
+For current-year (2026) predictions, the base model uses Massey ordinals in its features while the blending layer overlays actual Kalshi market data — both capture market consensus but through different mechanisms.
+
+**Men's only:** Massey ordinals (`MMasseyOrdinals.csv`) are available only for men's teams. Women's teams get a neutral value of 0.
+
 ### Model Architecture (`src/base_model.py`)
 
 **Logistic regression** on feature differentials (TeamA - TeamB, where TeamA has the lower TeamID per Kaggle convention):
@@ -151,7 +172,8 @@ Isotonic calibration transforms the logistic output into well-calibrated probabi
 - `elo_diff` = EloPreTourney_A - EloPreTourney_B
 - `seed_diff` = Seed_A - Seed_B
 - `eff_diff` = NetEff_A - NetEff_B
-- `closegametomargin_diff` = CloseGameTOMargin_A - CloseGameTOMargin_B
+- `offrebrate_diff` = OffRebRate_A - OffRebRate_B
+- `market_logodds_diff` = MasseyLogOdds_A - MasseyLogOdds_B
 
 Note: `opp3ptpct_diff` is **negated** (lower opponent 3pt% = better defense for that team).
 
@@ -161,7 +183,7 @@ All features are standardized with `StandardScaler` before model fitting. Predic
 
 **Leave-one-season-out cross-validation** across 2010-2025 (skip 2020 — no tournament).
 
-For each of 6 feature sets, trains on 14 seasons and evaluates Brier score on the held-out tournament:
+For each of 7 feature sets, trains on 14 seasons and evaluates Brier score on the held-out tournament:
 
 ```
 Brier = mean((prediction - actual)^2)
@@ -174,11 +196,12 @@ Results from the current model:
 | elo + seed | 0.1719 | Baseline |
 | + efficiency | 0.1716 | Small gain |
 | + 3pt defense | 0.1716 | No gain |
-| **+ close-game TO** | **0.1713** | **Best** |
-| + off rebounding | 0.1715 | Overfitting |
+| + close-game TO | 0.1713 | Previous best |
+| + off rebounding | 0.1715 | Slight regression |
 | + late FT% | 0.1718 | Overfitting |
+| **+ market log-odds** | **0.1711** | **Best — Massey composite proxy** |
 
-The pipeline automatically selects the feature set with the lowest average Brier score.
+The pipeline automatically selects the feature set with the lowest average Brier score. The winning set adds `market_logodds_diff` (Massey composite) alongside `elo_diff`, `seed_diff`, `eff_diff`, and `offrebrate_diff`.
 
 ---
 
@@ -242,36 +265,57 @@ confidence = 0.5 * depth_conf + 0.5 * volume_conf
 
 **Futures-to-pairwise conversion** (for championship odds):
 ```
-log_odds = log(p / (1-p))                    # per team
-diff = log_odds_A - log_odds_B               # pairwise
-P(A beats B) = 1 / (1 + exp(-0.3 * diff))    # logistic with 0.3 scale factor
+log_odds = log(p / (1-p))                      # per team
+diff = log_odds_A - log_odds_B                 # pairwise
+P(A beats B) = 1 / (1 + exp(-scale * diff))    # logistic with calibrated scale factor
 ```
 
-The 0.3 scale factor compresses championship log-odds (which span a wide range) into game-level probabilities. A difference of 2.0 in log-odds maps to ~65% win probability. Futures-derived confidence is discounted by 0.6x versus direct matchup markets.
+**Scale factor calibration** (`calibrate_futures_scale` in `src/market_features.py`): The scale factor that converts championship log-odds differentials into game-level probabilities is now **calibrated empirically** rather than hardcoded. For games that have both a direct matchup market AND both teams in futures, the function grid-searches over scale factors [0.2, 0.3, 0.4, 0.5, 0.6, 0.8] to minimize RMSE between futures-derived probabilities and actual matchup market prices. Current calibration finds **0.8** (up from the original hardcoded 0.3), meaning the previous factor was over-compressing — a 1-seed vs 12-seed log-odds differential of 3.0 should map to ~92% (at 0.8) rather than 71% (at 0.3). Futures-derived confidence is discounted by 0.6x versus direct matchup markets.
 
 ### Blending Algorithm (`src/blend.py`)
 
 **Priority:** Direct matchup market > Futures-derived > Base model only.
 
-**Weight determination:**
+The blending layer applies five adaptive strategies to determine how much to trust market signals vs the base model:
+
+**1. Base weight determination:**
 
 | Scenario | w_base | w_market | Rationale |
 |----------|--------|----------|-----------|
 | High-confidence matchup (conf >= 0.5) | 0.55-0.60 | 0.40-0.45 | Trust deep-liquidity markets |
+| **Very high-confidence matchup (conf > 0.9)** | **0.35** | **0.65** | **Liquid, well-priced — trust aggressively (Improvement 5)** |
 | Low-confidence matchup (conf < 0.5) | 0.85 | 0.15 | Thin market, mostly trust model |
-| Futures-derived (any confidence) | 0.85 | 0.15 | Indirect signal, conservative |
+| Futures-derived (confidence-adaptive) | 0.65-0.85 | 0.15-0.35 | Scales with confidence (Improvement 3) |
 | Whale activity (abs(signal) > 0.5) | -0.05 boost to market | | Smart money nudge |
 
-High-confidence matchup weight adjusts with confidence:
-```
-w_base = 0.6 - 0.1 * (confidence - 0.5)
-```
+**2. Confidence-adaptive futures weighting (Improvement 3):**
 
-All weights clipped to [0.1, 0.95]. Final blended prediction clipped to [0.03, 0.97].
+Instead of a flat 85/15 split for all futures-derived predictions, the market weight now scales with confidence:
+```
+w_market = 0.15 + 0.20 * confidence    # Range: [0.15, 0.35]
+w_base = 1.0 - w_market
+```
+High-confidence futures (Duke/Arizona with millions in volume, confidence ~0.60) get up to 0.27 market weight. Low-confidence mid-majors (confidence ~0.05) stay near 0.16.
 
+**3. Disagreement-based weight shifting (Improvement 4):**
+
+When the model and market disagree by more than 10%, the market weight is boosted:
+```
+disagreement = abs(base_pred - market_prob)
+if disagreement > 0.10:
+    w_base -= 0.10 * (disagreement - 0.10)    # Gradual boost
+```
+Intuition: if the model says 60% and the market says 45%, someone knows something (injury, travel issue, matchup dynamic). The additional market weight is proportional to the magnitude of disagreement beyond the 10% threshold.
+
+**4. Very high-confidence matchup override (Improvement 5):**
+
+For the ~40 direct matchup markets with confidence > 0.9, the base weight drops to 0.35 (market gets 0.65). These are the exact games scored by Kaggle, with liquid order books and well-calibrated prices. This is the single highest-leverage change — trusting the market more on scored games.
+
+**5. Final blending:**
 ```
 blended = w_base * base_pred + w_market * market_prob
 ```
+All weights clipped to [0.1, 0.95]. Final blended prediction clipped to [0.03, 0.97].
 
 ---
 
@@ -309,6 +353,8 @@ Monte Carlo simulation with 10,000 iterations per gender:
 
 1. **Isotonic calibration over Platt scaling** — isotonic is more flexible for the nonlinear probability surface of tournament games
 2. **Feature differentials, not raw values** — the model learns "how much better is A than B" directly, which is what matters for pairwise prediction
-3. **Conservative market blending (60/40 default)** — base model Brier of 0.1713 is already competitive; aggressive market weighting risks blowing it up on thin markets
-4. **Futures as log-odds, not direct probabilities** — championship odds of 20% vs 4% don't directly tell you P(A beats B), but the log-odds differential is an informative strength signal
-5. **0.03-0.97 clipping** — Kaggle's log-loss scoring heavily penalizes extreme predictions that are wrong; clipping limits downside risk
+3. **Market signal in two layers** — Massey composite enters the logistic regression as a learnable feature (the model learns the optimal weight via backtest), while live Kalshi data enters in the blending layer. This avoids the chicken-and-egg problem of needing market data at training time.
+4. **Calibrated scale factor over hardcoded** — the futures-to-matchup conversion scale factor (0.8) is calibrated against direct matchup markets rather than guessed. The original 0.3 was over-compressing, making 1-seed vs 12-seed look like 71% when it should be ~92%.
+5. **Adaptive blending, not fixed weights** — market weight varies by source (matchup vs futures), confidence, and model-market disagreement. High-confidence matchup markets on scored games get 65% market weight; thin futures markets get 15%.
+6. **Futures as log-odds, not direct probabilities** — championship odds of 20% vs 4% don't directly tell you P(A beats B), but the log-odds differential is an informative strength signal
+7. **0.03-0.97 clipping** — Kaggle's log-loss scoring heavily penalizes extreme predictions that are wrong; clipping limits downside risk
