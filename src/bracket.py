@@ -22,29 +22,27 @@ FIRST_ROUND_MATCHUPS = [
 ROUND_NAMES = ["R64", "R32", "S16", "E8", "F4", "Championship", "Winner"]
 
 
-def _get_prediction(
-    predictions: pd.DataFrame,
+def _build_prediction_lookup(predictions: pd.DataFrame) -> dict[tuple[int, int], float]:
+    """Build a fast lookup dict from predictions DataFrame. Key: (low_id, high_id) -> P(low wins)."""
+    lookup: dict[tuple[int, int], float] = {}
+    for _, row in predictions.iterrows():
+        parts = str(row["ID"]).split("_")
+        if len(parts) == 3:
+            low, high = int(parts[1]), int(parts[2])
+            lookup[(low, high)] = float(row["Pred"])
+    return lookup
+
+
+def _get_prediction_fast(
+    lookup: dict[tuple[int, int], float],
     team_a_id: int,
     team_b_id: int,
 ) -> float:
-    """Look up P(lower_id wins) from predictions DataFrame."""
+    """Look up P(team_a wins) from precomputed lookup dict."""
     low = min(team_a_id, team_b_id)
     high = max(team_a_id, team_b_id)
-
-    # Try to find in predictions
-    for season in predictions["ID"].str.split("_").str[0].unique():
-        match_id = f"{season}_{low}_{high}"
-        row = predictions[predictions["ID"] == match_id]
-        if not row.empty:
-            pred = float(row.iloc[0]["Pred"])
-            # Return P(team_a wins)
-            if team_a_id == low:
-                return pred
-            else:
-                return 1.0 - pred
-
-    # Fallback: 50/50
-    return 0.5
+    pred = lookup.get((low, high), 0.5)
+    return pred if team_a_id == low else 1.0 - pred
 
 
 def simulate_bracket(
@@ -81,6 +79,9 @@ def simulate_bracket(
     except Exception:
         team_names = {}
 
+    # Build fast prediction lookup
+    lookup = _build_prediction_lookup(predictions)
+
     # Run Monte Carlo simulations
     rng = np.random.default_rng(42)
 
@@ -116,7 +117,7 @@ def simulate_bracket(
                 advancement_counts[t1]["R64"] += 1
                 advancement_counts[t2]["R64"] += 1
 
-                prob_t1 = _get_prediction(predictions, t1, t2)
+                prob_t1 = _get_prediction_fast(lookup,t1, t2)
                 if is_chalk:
                     winner = t1 if prob_t1 >= 0.5 else t2
                     chalk_results.append(("R64", winner, t2 if winner == t1 else t1, max(prob_t1, 1 - prob_t1)))
@@ -139,7 +140,7 @@ def simulate_bracket(
                         next_round.append(t1 or t2)
                         continue
 
-                    prob_t1 = _get_prediction(predictions, t1, t2)
+                    prob_t1 = _get_prediction_fast(lookup,t1, t2)
                     if is_chalk:
                         winner = t1 if prob_t1 >= 0.5 else t2
                         chalk_results.append((round_name, winner, t2 if winner == t1 else t1, max(prob_t1, 1 - prob_t1)))
@@ -164,7 +165,7 @@ def simulate_bracket(
                 if t1 is None or t2 is None:
                     finalists.append(t1 or t2)
                     continue
-                prob_t1 = _get_prediction(predictions, t1, t2)
+                prob_t1 = _get_prediction_fast(lookup,t1, t2)
                 if is_chalk:
                     winner = t1 if prob_t1 >= 0.5 else t2
                     chalk_results.append(("F4", winner, t2 if winner == t1 else t1, max(prob_t1, 1 - prob_t1)))
@@ -176,7 +177,7 @@ def simulate_bracket(
             # Championship game
             if len(finalists) >= 2 and finalists[0] and finalists[1]:
                 t1, t2 = finalists[0], finalists[1]
-                prob_t1 = _get_prediction(predictions, t1, t2)
+                prob_t1 = _get_prediction_fast(lookup,t1, t2)
                 if is_chalk:
                     winner = t1 if prob_t1 >= 0.5 else t2
                     chalk_results.append(("Championship", winner, t2 if winner == t1 else t1, max(prob_t1, 1 - prob_t1)))

@@ -211,24 +211,72 @@ class MarchMadnessModel:
             template = loader.get_submission_template(1)
 
         seeds = loader.get_seeds()
-        predictions = []
 
-        for _, row in template.iterrows():
-            match_id = row["ID"]
-            parts = match_id.split("_")
-            match_season = int(parts[0])
-            team_a = int(parts[1])
-            team_b = int(parts[2])
+        # Build fast lookup dicts for ratings and seeds
+        ratings_idx = {}
+        for _, r in team_ratings.iterrows():
+            key = (int(r["Season"]), int(r["TeamID"]), r["Gender"])
+            ratings_idx[key] = r
 
-            # Determine gender from TeamID range
-            if CFG.MENS_ID_MIN <= team_a <= CFG.MENS_ID_MAX:
-                gender = "M"
-            else:
-                gender = "W"
+        seeds_idx = {}
+        for _, s in seeds.iterrows():
+            key = (int(s["Season"]), int(s["TeamID"]), s["Gender"])
+            seeds_idx[key] = int(s["SeedNum"])
 
-            pred = self.predict_matchup(
-                match_season, gender, team_a, team_b, team_ratings, seeds
-            )
-            predictions.append({"ID": match_id, "Pred": round(pred, 6)})
+        # Parse all IDs at once
+        split = template["ID"].str.split("_", expand=True)
+        all_seasons = split[0].astype(int).values
+        all_team_a = split[1].astype(int).values
+        all_team_b = split[2].astype(int).values
 
-        return pd.DataFrame(predictions)
+        # Build feature matrix for all matchups
+        feature_rows = []
+        valid_mask = []
+        for i in range(len(template)):
+            s = int(all_seasons[i])
+            ta = int(all_team_a[i])
+            tb = int(all_team_b[i])
+            gender = "M" if CFG.MENS_ID_MIN <= ta <= CFG.MENS_ID_MAX else "W"
+
+            r_a = ratings_idx.get((s, ta, gender))
+            r_b = ratings_idx.get((s, tb, gender))
+            if r_a is None or r_b is None:
+                feature_rows.append([0.0] * len(self.features))
+                valid_mask.append(False)
+                continue
+
+            row_vals = []
+            for feat in self.features:
+                if feat == "elo_diff":
+                    row_vals.append(r_a.get("EloPreTourney", 1500) - r_b.get("EloPreTourney", 1500))
+                elif feat == "seed_diff":
+                    sa = seeds_idx.get((s, ta, gender), 8)
+                    sb = seeds_idx.get((s, tb, gender), 8)
+                    row_vals.append(sa - sb)
+                elif feat == "eff_diff":
+                    row_vals.append(r_a.get("NetEff", 0) - r_b.get("NetEff", 0))
+                elif feat == "opp3ptpct_diff":
+                    row_vals.append(r_b.get("Opp3PtPct", 0) - r_a.get("Opp3PtPct", 0))
+                elif feat == "closegametomargin_diff":
+                    row_vals.append(r_a.get("CloseGameTOMargin", 0) - r_b.get("CloseGameTOMargin", 0))
+                elif feat == "offrebrate_diff":
+                    row_vals.append(r_a.get("OffRebRate", 0) - r_b.get("OffRebRate", 0))
+                elif feat == "lateftpct_diff":
+                    row_vals.append(r_a.get("LateFTPct", 0) - r_b.get("LateFTPct", 0))
+                else:
+                    row_vals.append(0.0)
+            feature_rows.append(row_vals)
+            valid_mask.append(True)
+
+        X = np.array(feature_rows)
+        preds = self.predict_proba(X)
+
+        # Set invalid matchups to 0.5
+        for i, valid in enumerate(valid_mask):
+            if not valid:
+                preds[i] = 0.5
+
+        return pd.DataFrame({
+            "ID": template["ID"].values,
+            "Pred": np.round(preds, 6),
+        })

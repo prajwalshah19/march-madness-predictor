@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from src.config import CFG
 
@@ -17,110 +21,157 @@ from src.config import CFG
 def market_data_available() -> bool:
     """Check if any market API credentials are configured."""
     return bool(
-        os.environ.get("KALSHI_API_KEY")
+        os.environ.get("KALSHI_ACCESS_KEY")
         or os.environ.get("POLYMARKET_API_KEY")
     )
 
 
 class KalshiClient:
-    """Client for the Kalshi prediction market API."""
+    """Client for the Kalshi prediction market API.
 
-    BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+    Uses RSA-PSS key signing per https://docs.kalshi.com/getting_started/api_keys
+    """
+
+    BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
     def __init__(self) -> None:
-        self.api_key = os.environ.get("KALSHI_API_KEY", "")
-        self.api_secret = os.environ.get("KALSHI_API_SECRET", "")
-        self.token: Optional[str] = None
+        self.access_key = os.environ.get("KALSHI_ACCESS_KEY", "")
+        key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
 
-        if not self.api_key:
-            raise ValueError("KALSHI_API_KEY not set in environment")
+        if not self.access_key:
+            raise ValueError("KALSHI_ACCESS_KEY not set in environment")
+        if not key_path:
+            raise ValueError("KALSHI_PRIVATE_KEY_PATH not set in environment")
 
-    def _authenticate(self) -> None:
-        """Authenticate and get session token."""
-        resp = requests.post(
-            f"{self.BASE_URL}/login",
-            json={"email": self.api_key, "password": self.api_secret},
-            timeout=30,
+        key_file = Path(key_path)
+        if not key_file.exists():
+            raise FileNotFoundError(f"Kalshi private key not found: {key_file}")
+
+        with open(key_file, "rb") as f:
+            self._private_key = serialization.load_pem_private_key(f.read(), password=None)
+
+    def _sign_request(self, method: str, path: str) -> dict[str, str]:
+        """Generate signed headers for a Kalshi API request.
+
+        Headers:
+            KALSHI-ACCESS-KEY: Key ID
+            KALSHI-ACCESS-TIMESTAMP: millisecond timestamp
+            KALSHI-ACCESS-SIGNATURE: RSA-PSS signed (timestamp + method + path)
+        """
+        timestamp_ms = str(int(time.time() * 1000))
+
+        # Strip query params from path for signing
+        path_no_query = urlparse(path).path
+
+        # Message: timestamp + METHOD + path (no query params)
+        message = f"{timestamp_ms}{method.upper()}{path_no_query}"
+
+        signature = self._private_key.sign(
+            message.encode("utf-8"),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
         )
-        resp.raise_for_status()
-        self.token = resp.json().get("token")
 
-    def _headers(self) -> dict[str, str]:
-        if not self.token:
-            self._authenticate()
-        return {"Authorization": f"Bearer {self.token}"}
+        return {
+            "KALSHI-ACCESS-KEY": self.access_key,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("utf-8"),
+            "Content-Type": "application/json",
+        }
+
+    def _get(self, endpoint: str, params: Optional[dict] = None) -> dict:
+        """Make an authenticated GET request."""
+        url = f"{self.BASE_URL}{endpoint}"
+        # Sign against the API path (not full URL)
+        headers = self._sign_request("GET", f"/trade-api/v2{endpoint}")
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    # Series tickers for NCAA basketball markets on Kalshi
+    NCAA_SERIES = [
+        "KXMARMAD",        # Men's College Basketball Champion
+        "KXWMARMAD",       # Women's College Basketball Champion
+        "KXNCAAMBGAME",    # Men's College Basketball matchup games
+        "KXMARMADSEED",    # Seed to win men's championship
+        "KXMARMADCONFWIN", # Conference to win men's championship
+        "KXMARMADPTS",     # Tournament player points
+        "KXNCAAMBMOP",     # Men's tournament MOP
+        "KXNCAAWBMOP",     # Women's tournament MOP
+    ]
 
     def get_ncaa_markets(self) -> list[dict[str, Any]]:
-        """Fetch NCAA basketball markets."""
+        """Fetch NCAA basketball markets across all relevant series."""
         markets = []
-        cursor: Optional[str] = None
 
-        for _ in range(10):  # Max 10 pages
-            params: dict[str, Any] = {
-                "limit": 100,
-                "status": "open",
-                "series_ticker": "NCAA",
-            }
-            if cursor:
-                params["cursor"] = cursor
+        for series in self.NCAA_SERIES:
+            cursor: Optional[str] = None
+            for _ in range(10):  # Max 10 pages per series
+                params: dict[str, Any] = {
+                    "limit": 100,
+                    "series_ticker": series,
+                }
+                if cursor:
+                    params["cursor"] = cursor
 
-            resp = requests.get(
-                f"{self.BASE_URL}/markets",
-                headers=self._headers(),
-                params=params,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+                try:
+                    data = self._get("/markets", params)
+                except requests.HTTPError:
+                    break
 
-            batch = data.get("markets", [])
-            markets.extend(batch)
+                batch = data.get("markets", [])
+                markets.extend(batch)
 
-            cursor = data.get("cursor")
-            if not cursor or not batch:
-                break
+                cursor = data.get("cursor")
+                if not cursor or not batch:
+                    break
 
         return markets
 
     def get_orderbook(self, ticker: str) -> dict[str, Any]:
         """Fetch order book for a specific market."""
-        resp = requests.get(
-            f"{self.BASE_URL}/orderbook/{ticker}",
-            headers=self._headers(),
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json().get("orderbook", {})
+        data = self._get(f"/markets/{ticker}/orderbook")
+        return data.get("orderbook", {})
 
     def get_trades(self, ticker: str, limit: int = 100) -> list[dict[str, Any]]:
         """Fetch recent trades for a market."""
-        resp = requests.get(
-            f"{self.BASE_URL}/markets/{ticker}/trades",
-            headers=self._headers(),
-            params={"limit": limit},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json().get("trades", [])
+        data = self._get("/markets/trades", {"ticker": ticker, "limit": limit})
+        return data.get("trades", [])
 
     def fetch_all_ncaa_data(self) -> dict[str, Any]:
-        """Fetch all NCAA market data including order books and trades."""
+        """Fetch all NCAA market data including order books and trades.
+
+        Only fetches orderbook/trades for active markets to avoid
+        wasting API calls on finalized/settled markets.
+        """
         markets = self.get_ncaa_markets()
-        print(f"    Found {len(markets)} Kalshi NCAA markets")
+        active = [m for m in markets if m.get("status") == "active"]
+        print(f"    Found {len(markets)} Kalshi NCAA markets ({len(active)} active)")
 
         enriched_markets = []
-        for market in markets:
+        for market in active:
             ticker = market.get("ticker", "")
             try:
                 market["orderbook"] = self.get_orderbook(ticker)
                 market["recent_trades"] = self.get_trades(ticker)
-                time.sleep(0.2)  # Rate limiting
+                time.sleep(0.1)  # Rate limiting
             except Exception as e:
                 market["orderbook"] = {}
                 market["recent_trades"] = []
                 print(f"    WARNING: Failed to fetch details for {ticker}: {e}")
 
             enriched_markets.append(market)
+
+        # Also include non-active markets (with basic data, no orderbook)
+        # so we have last_price data from settled/finalized markets
+        for market in markets:
+            if market.get("status") != "active":
+                market["orderbook"] = {}
+                market["recent_trades"] = []
+                enriched_markets.append(market)
 
         return {
             "source": "kalshi",
@@ -146,7 +197,6 @@ class PolymarketClient:
     def get_ncaa_markets(self) -> list[dict[str, Any]]:
         """Fetch NCAA basketball markets."""
         markets = []
-        # Search for NCAA/March Madness markets
         for query in ["NCAA", "March Madness", "college basketball"]:
             try:
                 resp = requests.get(
@@ -208,7 +258,7 @@ def fetch_market_data() -> dict[str, Any]:
     }
 
     # Kalshi
-    if os.environ.get("KALSHI_API_KEY"):
+    if os.environ.get("KALSHI_ACCESS_KEY"):
         try:
             print("  Fetching Kalshi data...")
             client = KalshiClient()

@@ -4,6 +4,8 @@ __pycache__/
 dist/
 build/
 .env
+*.pem
+*.key
 *.egg
 .venv/
 venv/
