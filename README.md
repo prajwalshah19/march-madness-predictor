@@ -332,6 +332,154 @@ Monte Carlo simulation with 10,000 iterations per gender:
 
 ---
 
+## CLI: `mm-predict` (`mm_predict.py`)
+
+Interactive bracket-building tool that looks up any matchup or team path from the cached predictions. Install with `uv pip install -e .` for the `mm-predict` command, or run directly with `python mm_predict.py`.
+
+### Matchup Prediction
+
+```bash
+mm-predict "Duke" "Arizona"           # Head-to-head prediction
+mm-predict "Duke" "Arizona" -v        # With detailed team profiles
+mm-predict "UConn" "South Carolina" -g W   # Women's tournament
+```
+
+Example output:
+
+```
+  ========================================================
+  (1) Duke  vs  (1) Arizona
+  ========================================================
+
+  Winner:      Duke
+  Win Prob:    52.3%
+  Confidence:  Toss-up
+  Variance:    0.2495
+
+  ── Probability Breakdown ──
+  Duke                       52.3%
+  Arizona                    47.7%
+
+  ── Model vs Market ──
+                               Model   Market  Blended
+  Duke                        52.2%   52.7%   52.3%
+  Arizona                     47.8%   47.3%   47.7%
+  Market source: futures (confidence: 0.60)
+
+  ── Championship Futures ──
+  Duke                       19.5% to win title  (vol: $6,204,060)
+  Arizona                    17.5% to win title  (vol: $5,656,110)
+```
+
+With `-v`, also shows Elo, net efficiency, adjusted offense/defense, tempo, 3pt defense, offensive rebounding rate, FT%, and Massey log-odds for both teams.
+
+### Bracket Path
+
+Shows a team's full path through the actual bracket with round-by-round advancement probabilities computed via forward propagation through the bracket tree.
+
+```bash
+mm-predict path "Duke"          # Full bracket path
+mm-predict path "UConn" -g W    # Women's bracket path
+```
+
+Example output:
+
+```
+  ==================================================================
+  (1) Duke — Region W Bracket Path
+  ==================================================================
+
+  Round of 64    vs (16) Siena
+                 Win: 97.0%
+                 Advance prob: 97.0%
+
+  Round of 32    Likely opponents:
+                  ( 8) Ohio St              56% chance  |  beat: 92%
+                  ( 9) TCU                  44% chance  |  beat: 92%
+                 Weighted win: 91.7%
+                 Advance prob: 88.9%
+
+  Sweet 16       Likely opponents:
+                  ( 5) St John's            52% chance  |  beat: 78%
+                  ( 4) Kansas               40% chance  |  beat: 84%
+                  (12) Northern Iowa         6% chance  |  beat: 95%
+                  (13) Cal Baptist           3% chance  |  beat: 96%
+                 Weighted win: 82.1%
+                 Advance prob: 73.0%
+
+  Elite 8        Likely opponents:
+                  ( 2) Connecticut          44% chance  |  beat: 76%
+                  ( 3) Michigan St          29% chance  |  beat: 79%
+                  ( 6) Louisville           11% chance  |  beat: 85%
+                  ( 7) UCLA                  9% chance  |  beat: 87%
+                  ... and 2 others
+                 Weighted win: 80.2%
+                 Advance prob: 58.6%
+
+  Final Four     vs Region X champion:
+                  ( 1) Florida              43% chance  |  beat: 64%
+                  ( 2) Houston              23% chance  |  beat: 70%
+                  ( 3) Illinois             17% chance  |  beat: 75%
+                  ( 5) Vanderbilt            6% chance  |  beat: 82%
+                 Weighted win: 70.2%
+                 Reach F4: 58.6% | Win F4: 41.2%
+
+  Championship   vs Region Y/Z champion
+                  ( 1) Michigan             53% chance  |  beat: 56%
+                  ( 1) Arizona              50% chance  |  beat: 52%
+                  ( 2) Purdue               21% chance  |  beat: 71%
+                  ( 2) Iowa St              18% chance  |  beat: 75%
+                 Weighted win: 65.1%
+
+  ── Summary ──
+  Model championship prob:  26.8%
+  Market championship prob: 19.5%  (vol: $6,204,060)
+```
+
+For each round, the path shows:
+- **R64:** Actual opponent and win probability
+- **R32-E8:** Likely opponents weighted by their probability of advancing, plus a weighted win probability across all possible opponents
+- **F4/Championship:** Top contenders from opposing regions with head-to-head win probabilities
+- **Summary:** Model vs market championship probability
+
+### Upset Finder
+
+Scans the actual bracket for upset candidates, ranked by probability.
+
+```bash
+mm-predict upsets              # All actual bracket upsets (R64 + R32)
+mm-predict upsets 12           # 12-seed upset candidates only
+mm-predict upsets -g W         # Women's tournament upsets
+mm-predict upsets --all        # All possible cross-region matchups
+```
+
+Example output:
+
+```
+  ==========================================================================
+  Men's Upset Candidates — Actual Bracket
+  ==========================================================================
+
+  Matchup                                       Upset% Region Round
+  --------------------------------------------------------------------------
+  ( 5) St John's          > ( 4) Kansas            59.3%      W   R32 ***
+  ( 9) Utah St            > ( 8) Villanova         55.6%      Z   R64 ***
+  ( 5) Vanderbilt         > ( 4) Nebraska          55.2%      X   R32 ***
+  ( 9) Iowa               > ( 8) Clemson           51.4%      X   R64 ***
+  ( 9) TCU                > ( 8) Ohio St           44.3%      W   R64  **
+  (11) VCU                > ( 6) North Carolina    43.1%      X   R64  **
+  (10) Santa Clara        > ( 7) Kentucky          43.0%      Y   R64  **
+  (10) Missouri           > ( 7) Miami FL          40.9%      Z   R64  **
+  (11) Texas              > ( 6) BYU               39.8%      Z   R64  **
+  (12) Akron              > ( 5) Texas Tech        28.7%      Y   R64   *
+
+  *** = model favors upset  ** = strong candidate  * = worth considering
+```
+
+By default, only shows actual bracket pairings (same-region matchups). Use `--all` to see every possible seed-vs-seed matchup across all regions.
+
+---
+
 ## Output Files
 
 | File | Description |

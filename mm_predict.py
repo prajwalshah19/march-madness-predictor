@@ -668,14 +668,15 @@ def find_upsets(
             ((7, 10), (2, 15)),
         ]
         for (fa, fb), (da, db) in r32_seed_pairs:
-            if filter_seed is not None and filter_seed not in (fa, fb, da, db):
-                continue
             # Most likely R32 matchup is chalk (lower seed wins R64)
             fav_seed_r32 = min(fa, fb)
             dog_seed_r32 = min(da, db)
             if fav_seed_r32 > dog_seed_r32:
                 fav_seed_r32, dog_seed_r32 = dog_seed_r32, fav_seed_r32
                 fa, fb, da, db = da, db, fa, fb
+
+            if filter_seed is not None and filter_seed not in (fav_seed_r32, dog_seed_r32):
+                continue
 
             fav_tid = region_teams.get(min(fa, fb))
             dog_tid = region_teams.get(min(da, db))
