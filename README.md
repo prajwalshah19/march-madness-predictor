@@ -444,39 +444,130 @@ For each round, the path shows:
 
 ### Upset Finder
 
-Scans the actual bracket for upset candidates, ranked by probability.
+Scans the actual bracket for upset candidates at any round, ranked by probability. For rounds beyond R64, assumes chalk (higher seed wins) in all prior rounds to determine matchups.
 
 ```bash
-mm-predict upsets              # All actual bracket upsets (R64 + R32)
-mm-predict upsets 12           # 12-seed upset candidates only
-mm-predict upsets -g W         # Women's tournament upsets
-mm-predict upsets --all        # All possible cross-region matchups
+mm-predict upsets              # R64 upsets (default)
+mm-predict upsets R32          # Round of 32 upsets
+mm-predict upsets S16          # Sweet 16 upsets
+mm-predict upsets E8           # Elite 8 upsets
+mm-predict upsets F4           # Final Four matchups
+mm-predict upsets C            # Championship
+mm-predict upsets 12           # R64, 12-seeds only
+mm-predict upsets R32 8        # R32, 8-seeds only
+mm-predict upsets -g W         # Women's tournament
 ```
 
-Example output:
+Example — R64 upsets:
 
 ```
   ==========================================================================
-  Men's Upset Candidates — Actual Bracket
+  Men's Round of 64 — Upset Candidates (Chalk Path)
   ==========================================================================
 
-  Matchup                                       Upset% Region Round
-  --------------------------------------------------------------------------
-  ( 5) St John's          > ( 4) Kansas            59.3%      W   R32 ***
-  ( 9) Utah St            > ( 8) Villanova         55.6%      Z   R64 ***
-  ( 5) Vanderbilt         > ( 4) Nebraska          55.2%      X   R32 ***
-  ( 9) Iowa               > ( 8) Clemson           51.4%      X   R64 ***
-  ( 9) TCU                > ( 8) Ohio St           44.3%      W   R64  **
-  (11) VCU                > ( 6) North Carolina    43.1%      X   R64  **
-  (10) Santa Clara        > ( 7) Kentucky          43.0%      Y   R64  **
-  (10) Missouri           > ( 7) Miami FL          40.9%      Z   R64  **
-  (11) Texas              > ( 6) BYU               39.8%      Z   R64  **
-  (12) Akron              > ( 5) Texas Tech        28.7%      Y   R64   *
+  Matchup                                       Upset% Region
+  ------------------------------------------------------------
+  ( 9) Utah St            > ( 8) Villanova         55.6%      Z ***
+  ( 9) Iowa               > ( 8) Clemson           51.4%      X ***
+  ( 9) TCU                > ( 8) Ohio St           44.3%      W  **
+  (11) VCU                > ( 6) North Carolina    43.1%      X  **
+  (10) Santa Clara        > ( 7) Kentucky          43.0%      Y  **
+  (10) Missouri           > ( 7) Miami FL          40.9%      Z  **
+  (11) Texas              > ( 6) BYU               39.8%      Z  **
 
   *** = model favors upset  ** = strong candidate  * = worth considering
+  Matchups assume chalk (higher seed wins) in all prior rounds
 ```
 
-By default, only shows actual bracket pairings (same-region matchups). Use `--all` to see every possible seed-vs-seed matchup across all regions.
+Example — Sweet 16 upsets (chalk path):
+
+```
+  ==========================================================================
+  Men's Sweet 16 — Upset Candidates (Chalk Path)
+  ==========================================================================
+
+  Matchup                                       Upset% Region
+  ------------------------------------------------------------
+  ( 3) Illinois           > ( 2) Houston           43.8%      X  **
+  ( 3) Virginia           > ( 2) Iowa St           43.3%      Y  **
+  ( 3) Michigan St        > ( 2) Connecticut       42.9%      W  **
+  ( 3) Gonzaga            > ( 2) Purdue            42.5%      Z  **
+  ( 5) Vanderbilt         > ( 1) Florida           25.9%      X   *
+  ( 4) Arkansas           > ( 1) Arizona           24.6%      Z
+  ( 4) Alabama            > ( 1) Michigan          22.8%      Y
+  ( 5) St John's          > ( 1) Duke              21.9%      W
+
+  *** = model favors upset  ** = strong candidate  * = worth considering
+  Matchups assume chalk (higher seed wins) in all prior rounds
+```
+
+Valid rounds: `R64`, `R32`, `S16`, `E8`, `F4`, `C`.
+
+### Full Bracket
+
+Generates a visual ASCII bracket showing the model's chalk picks (always picks higher-probability team) at every round, with win probabilities and advancement odds.
+
+```bash
+mm-predict bracket             # Men's bracket
+mm-predict bracket -g W        # Women's bracket
+```
+
+Example output (abbreviated):
+
+```
+  ==============================================================================
+  Men's NCAA Tournament Bracket — 2026 (Model Picks)
+  ==============================================================================
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │ Region W                                                             │
+  │ R64                   R32                   Sweet 16       Elite 8   │
+  │──────────────────────────────────────────────────────────────────────│
+  │ ( 1) Duke        97%  ( 1) Duke        92%  ( 1) Duke  78%  Duke 76%│
+  │ ( 8) Ohio St     56%                                                 │
+  │ ( 4) Kansas      87%  ( 5) St John's   59%                          │
+  │ ( 5) St John's   83%                                                 │
+  │ ( 6) Louisville   64%  ( 3) Michigan St 59%  ( 2) UConn 57%         │
+  │ ( 3) Michigan St 92%                                                 │
+  │ ( 7) UCLA        69%  ( 2) Connecticut 70%                          │
+  │ ( 2) Connecticut 96%                                                 │
+  └───────────────────────────────────────────────────────────────────────┘
+  ... (Regions X, Y, Z)
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │ Final Four                                                           │
+  │  ( 1) Duke       [W]  vs  ( 1) Florida    [X]                       │
+  │  Winner: ( 1) Duke       (64%)                                       │
+  │                                                                       │
+  │  ( 1) Michigan   [Y]  vs  ( 1) Arizona    [Z]                       │
+  │  Winner: ( 1) Arizona    (53%)                                       │
+  │──────────────────────────────────────────────────────────────────────│
+  │  Championship: ( 1) Duke  vs  ( 1) Arizona                          │
+  │  Champion: ( 1) Duke (52%)  (Kalshi: 20%)                           │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │ Advancement Probabilities (Top 16)                                   │
+  │  Team                  Rgn   R32   S16    E8    F4                   │
+  │──────────────────────────────────────────────────────────────────────│
+  │  ( 1) Duke               W   97%   89%   73%   59%                  │
+  │  ( 1) Michigan           Y   97%   87%   70%   53%                  │
+  │  ( 1) Arizona            Z   97%   86%   68%   50%                  │
+  │  ( 1) Florida            X   97%   83%   65%   43%                  │
+  │  ...                                                                 │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+### First Four
+
+First Four play-in results are hardcoded in `mm_predict.py` (`FIRST_FOUR_WINNERS` / `FIRST_FOUR_LOSERS`). Losers are excluded from all bracket outputs. Current results:
+
+| Game | Winner | Loser |
+|------|--------|-------|
+| Y11 | Miami OH | SMU |
+| Z11 | Texas | NC State |
+| X16 | Prairie View | Lehigh |
+| Y16 | Howard | UMBC |
 
 ---
 
