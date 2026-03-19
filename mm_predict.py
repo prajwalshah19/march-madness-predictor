@@ -3,10 +3,11 @@
 
 Usage:
     mm-predict "Duke" "Arizona"
-    mm-predict "UConn" "South Carolina" -g W
-    mm-predict "Houston" "Florida" -v
-    mm-predict upsets             # Show likely upsets by round
-    mm-predict upsets 12          # Show upsets for 12-seeds specifically
+    mm-predict "Duke" "Arizona" -v
+    mm-predict path "Duke"                # Show bracket path with probabilities
+    mm-predict upsets                     # Actual bracket upset candidates
+    mm-predict upsets 12                  # 12-seed upset candidates
+    mm-predict upsets --all               # All possible cross-region matchups
 """
 
 from __future__ import annotations
@@ -22,7 +23,66 @@ from src.config import CFG
 from src.team_matcher import TeamMatcher
 
 
-def load_data() -> tuple[TeamMatcher, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+# ── Bracket structure ────────────────────────────────────────────
+# Per-region bracket tree: R64 seed pairings and how they feed into later rounds.
+# R64 games indexed 0-7, then grouped into R32, S16, E8.
+R64_PAIRINGS = [(1, 16), (8, 9), (4, 13), (5, 12), (6, 11), (3, 14), (7, 10), (2, 15)]
+
+# R32: which R64 game winners play each other (indices into R64_PAIRINGS)
+R32_PAIRINGS = [(0, 1), (3, 2), (4, 5), (7, 6)]
+# i.e., R32 game 0: winner(1v16) vs winner(8v9)
+#       R32 game 1: winner(5v12) vs winner(4v13)
+#       R32 game 2: winner(6v11) vs winner(3v14)
+#       R32 game 3: winner(2v15) vs winner(7v10)
+# NOTE: ordering follows actual bracket (R2x1=0,1 R2x4=3,2 R2x3=4,5 R2x2=7,6)
+
+# S16: which R32 game winners play each other (indices into R32 results)
+S16_PAIRINGS = [(0, 1), (3, 2)]
+
+# E8: which S16 winners play each other
+E8_PAIRINGS = [(0, 1)]
+
+# Final Four region pairings (from tournament slots: R5WX, R5YZ)
+# Will be parsed dynamically from slot data.
+
+ROUND_NAMES = ["R64", "R32", "Sweet 16", "Elite 8", "Final Four", "Championship"]
+
+# Which seeds are in each "bracket section" for opponent lookup
+# Maps seed -> opponent seeds at each round within the same region
+OPPONENT_SEEDS: dict[int, dict[str, list[int]]] = {}
+_top_quarter_a = [1, 16]
+_top_quarter_b = [8, 9]
+_mid_quarter_a = [4, 13]
+_mid_quarter_b = [5, 12]
+_bot_quarter_a = [6, 11]
+_bot_quarter_b = [3, 14]
+_low_quarter_a = [7, 10]
+_low_quarter_b = [2, 15]
+
+_top_half = _top_quarter_a + _top_quarter_b + _mid_quarter_a + _mid_quarter_b
+_bot_half = _bot_quarter_a + _bot_quarter_b + _low_quarter_a + _low_quarter_b
+
+for s in _top_quarter_a:
+    OPPONENT_SEEDS[s] = {"R32": _top_quarter_b, "S16": _mid_quarter_a + _mid_quarter_b, "E8": _bot_half}
+for s in _top_quarter_b:
+    OPPONENT_SEEDS[s] = {"R32": _top_quarter_a, "S16": _mid_quarter_a + _mid_quarter_b, "E8": _bot_half}
+for s in _mid_quarter_a:
+    OPPONENT_SEEDS[s] = {"R32": _mid_quarter_b, "S16": _top_quarter_a + _top_quarter_b, "E8": _bot_half}
+for s in _mid_quarter_b:
+    OPPONENT_SEEDS[s] = {"R32": _mid_quarter_a, "S16": _top_quarter_a + _top_quarter_b, "E8": _bot_half}
+for s in _bot_quarter_a:
+    OPPONENT_SEEDS[s] = {"R32": _bot_quarter_b, "S16": _low_quarter_a + _low_quarter_b, "E8": _top_half}
+for s in _bot_quarter_b:
+    OPPONENT_SEEDS[s] = {"R32": _bot_quarter_a, "S16": _low_quarter_a + _low_quarter_b, "E8": _top_half}
+for s in _low_quarter_a:
+    OPPONENT_SEEDS[s] = {"R32": _low_quarter_b, "S16": _bot_quarter_a + _bot_quarter_b, "E8": _top_half}
+for s in _low_quarter_b:
+    OPPONENT_SEEDS[s] = {"R32": _low_quarter_a, "S16": _bot_quarter_a + _bot_quarter_b, "E8": _top_half}
+
+
+# ── Data loading ─────────────────────────────────────────────────
+
+def load_data():
     """Load all cached pipeline artifacts. Exits if not available."""
     import io
     import warnings
@@ -35,7 +95,6 @@ def load_data() -> tuple[TeamMatcher, pd.DataFrame, pd.DataFrame, pd.DataFrame, 
         print("ERROR: Run `python main.py` first to generate predictions.")
         sys.exit(1)
 
-    # Suppress loader/matcher print output
     _stdout = sys.stdout
     sys.stdout = io.StringIO()
     try:
@@ -43,6 +102,10 @@ def load_data() -> tuple[TeamMatcher, pd.DataFrame, pd.DataFrame, pd.DataFrame, 
         from src.data_loader import DataLoader
         loader = DataLoader(CFG.DATA_DIR)
         seeds = loader.get_seeds()
+        try:
+            slots = loader.get_tourney_slots(season=CFG.TARGET_SEASON)
+        except Exception:
+            slots = pd.DataFrame()
     finally:
         sys.stdout = _stdout
 
@@ -50,13 +113,12 @@ def load_data() -> tuple[TeamMatcher, pd.DataFrame, pd.DataFrame, pd.DataFrame, 
     preds = pd.read_csv(preds_path)
     seeds = seeds[seeds["Season"] == CFG.TARGET_SEASON]
 
-    # Load market signals if available
     market_path = CFG.OUTPUT_DIR / "market_signals.csv"
     futures_path = CFG.OUTPUT_DIR / "futures_signals.csv"
     market_signals = pd.read_csv(market_path) if market_path.exists() else pd.DataFrame()
     futures_signals = pd.read_csv(futures_path) if futures_path.exists() else pd.DataFrame()
 
-    return matcher, ratings, preds, seeds, market_signals, futures_signals
+    return matcher, ratings, preds, seeds, slots, market_signals, futures_signals
 
 
 def resolve_team(matcher: TeamMatcher, name: str, gender: str) -> int | None:
@@ -71,21 +133,16 @@ def resolve_team(matcher: TeamMatcher, name: str, gender: str) -> int | None:
 
 
 def get_seed(seeds: pd.DataFrame, team_id: int, gender: str) -> int | None:
-    """Get numeric seed for a team."""
     row = seeds[(seeds["TeamID"] == team_id) & (seeds["Gender"] == gender)]
-    if row.empty:
-        return None
-    return int(row.iloc[0]["SeedNum"])
+    return int(row.iloc[0]["SeedNum"]) if not row.empty else None
 
 
 def get_seed_str(seeds: pd.DataFrame, team_id: int, gender: str) -> str:
-    """Get seed string like '(1)' or '(12)' for a team."""
     s = get_seed(seeds, team_id, gender)
     return f"({s})" if s is not None else ""
 
 
 def get_futures(futures_signals: pd.DataFrame, team_id: int) -> dict | None:
-    """Look up futures data for a team."""
     if futures_signals.empty:
         return None
     row = futures_signals[futures_signals["TeamID"] == team_id]
@@ -93,6 +150,330 @@ def get_futures(futures_signals: pd.DataFrame, team_id: int) -> dict | None:
         return None
     return row.sort_values("MarketConfidence", ascending=False).iloc[0].to_dict()
 
+
+def _get_pred(preds: pd.DataFrame, team_a: int, team_b: int) -> float:
+    """Get P(team_a wins) from predictions. Returns 0.5 if not found."""
+    lo, hi = min(team_a, team_b), max(team_a, team_b)
+    match_id = f"{CFG.TARGET_SEASON}_{lo}_{hi}"
+    row = preds[preds["ID"] == match_id]
+    if row.empty:
+        return 0.5
+    p = float(row.iloc[0]["Pred"])
+    return p if team_a == lo else (1 - p)
+
+
+def _build_bracket(seeds: pd.DataFrame, gender: str) -> dict[str, dict[int, int]]:
+    """Build region -> {seed_num: team_id} mapping."""
+    gender_seeds = seeds[seeds["Gender"] == gender]
+    bracket: dict[str, dict[int, int]] = {}
+    for _, row in gender_seeds.iterrows():
+        region = str(row["Region"])
+        sn = int(row["SeedNum"])
+        tid = int(row["TeamID"])
+        bracket.setdefault(region, {})[sn] = tid
+    return bracket
+
+
+def _get_f4_pairings(slots: pd.DataFrame, gender: str) -> list[tuple[str, str]]:
+    """Parse Final Four region pairings from tournament slots."""
+    if slots.empty:
+        # Default NCAA bracket structure
+        return [("W", "X"), ("Y", "Z")]
+
+    prefix = "M" if gender == "M" else "W"
+    seen = set()
+    pairings = []
+    for _, row in slots.iterrows():
+        slot = str(row.get("Slot", ""))
+        if slot.startswith("R5"):
+            strong = str(row.get("StrongSeed", ""))
+            weak = str(row.get("WeakSeed", ""))
+            r1 = strong[-2] if len(strong) >= 2 else ""
+            r2 = weak[-2] if len(weak) >= 2 else ""
+            pair = (r1, r2)
+            if r1 and r2 and pair not in seen:
+                seen.add(pair)
+                pairings.append(pair)
+
+    return pairings if pairings else [("W", "X"), ("Y", "Z")]
+
+
+# ── Bracket probability computation ──────────────────────────────
+
+def compute_region_probs(
+    preds: pd.DataFrame,
+    region_teams: dict[int, int],
+    matcher: TeamMatcher,
+) -> dict[int, dict[str, float]]:
+    """Compute P(each seed reaches each round) for a single region.
+
+    Uses exact bracket tree structure with forward probability propagation.
+
+    Returns: {team_id: {"R64": 1.0, "R32": p, "S16": p, "E8": p, "F4": p}}
+    """
+    def pred(sa: int, sb: int) -> float:
+        ta = region_teams.get(sa, 0)
+        tb = region_teams.get(sb, 0)
+        if ta == 0 or tb == 0:
+            return 0.5
+        return _get_pred(preds, ta, tb)
+
+    all_seeds = set(region_teams.keys())
+
+    # P(reach R64) = 1.0 for all
+    p = {s: {"R64": 1.0} for s in all_seeds}
+
+    # R64: compute P(reach R32) = P(win R64 game)
+    for sa, sb in R64_PAIRINGS:
+        if sa in all_seeds and sb in all_seeds:
+            w = pred(sa, sb)
+            p[sa]["R32"] = w
+            p[sb]["R32"] = 1 - w
+
+    # Fill missing seeds
+    for s in all_seeds:
+        p[s].setdefault("R32", 0.0)
+
+    # R32 -> S16: for each seed, weighted probability across possible opponents
+    for s in all_seeds:
+        opp_seeds = OPPONENT_SEEDS.get(s, {}).get("R32", [])
+        prob_advance = 0.0
+        for opp in opp_seeds:
+            if opp in all_seeds:
+                prob_advance += p[s]["R32"] * p[opp]["R32"] * pred(s, opp)
+        p[s]["S16"] = prob_advance
+
+    # S16 -> E8
+    for s in all_seeds:
+        opp_seeds = OPPONENT_SEEDS.get(s, {}).get("S16", [])
+        prob_advance = 0.0
+        for opp in opp_seeds:
+            if opp in all_seeds:
+                prob_advance += p[s]["S16"] * p[opp]["S16"] * pred(s, opp)
+        p[s]["E8"] = prob_advance
+
+    # E8 -> F4 (region final)
+    for s in all_seeds:
+        opp_seeds = OPPONENT_SEEDS.get(s, {}).get("E8", [])
+        prob_advance = 0.0
+        for opp in opp_seeds:
+            if opp in all_seeds:
+                prob_advance += p[s]["E8"] * p[opp]["E8"] * pred(s, opp)
+        p[s]["F4"] = prob_advance
+
+    # Convert to team_id keys
+    result: dict[int, dict[str, float]] = {}
+    for s, probs in p.items():
+        tid = region_teams.get(s, 0)
+        if tid:
+            result[tid] = probs
+
+    return result
+
+
+# ── Path command ─────────────────────────────────────────────────
+
+def show_path(
+    matcher: TeamMatcher,
+    preds: pd.DataFrame,
+    seeds: pd.DataFrame,
+    slots: pd.DataFrame,
+    futures_signals: pd.DataFrame,
+    team_name: str,
+    gender: str,
+) -> None:
+    """Show a team's bracket path with round-by-round probabilities."""
+    team_id = resolve_team(matcher, team_name, gender)
+    if team_id is None:
+        print(f"  Could not find team: '{team_name}'")
+        sys.exit(1)
+
+    name = matcher.get_name(team_id)
+    team_seed_row = seeds[(seeds["TeamID"] == team_id) & (seeds["Gender"] == gender)]
+    if team_seed_row.empty:
+        print(f"  {name} is not in the {CFG.TARGET_SEASON} tournament bracket")
+        sys.exit(1)
+
+    team_seed = int(team_seed_row.iloc[0]["SeedNum"])
+    team_region = str(team_seed_row.iloc[0]["Region"])
+
+    # Build full bracket
+    bracket = _build_bracket(seeds, gender)
+    region_teams = bracket.get(team_region, {})
+
+    # Compute advancement probabilities for this region
+    region_probs = compute_region_probs(preds, region_teams, matcher)
+
+    # Also compute all other regions for F4/Championship
+    all_region_probs: dict[str, dict[int, dict[str, float]]] = {}
+    for reg, rteams in bracket.items():
+        all_region_probs[reg] = compute_region_probs(preds, rteams, matcher)
+
+    # Get F4 pairings
+    f4_pairings = _get_f4_pairings(slots, gender)
+    opposing_f4_region = None
+    championship_regions = []
+    for r1, r2 in f4_pairings:
+        if team_region == r1:
+            opposing_f4_region = r2
+        elif team_region == r2:
+            opposing_f4_region = r1
+        else:
+            championship_regions.extend([r1, r2])
+
+    my_probs = region_probs.get(team_id, {})
+
+    print()
+    print(f"  {'=' * 66}")
+    print(f"  ({team_seed}) {name} — Region {team_region} Bracket Path")
+    print(f"  {'=' * 66}")
+    print()
+
+    cumulative = 1.0
+    rounds_data = [
+        ("R64", "R32", "Round of 64"),
+        ("R32", "S16", "Round of 32"),
+        ("S16", "E8", "Sweet 16"),
+        ("E8", "F4", "Elite 8"),
+    ]
+
+    for from_round, to_round, display_name in rounds_data:
+        opp_seed_list = OPPONENT_SEEDS.get(team_seed, {}).get(from_round, []) if from_round != "R64" else []
+        r64_opp = None
+
+        if from_round == "R64":
+            # Direct opponent from R64 pairings
+            for sa, sb in R64_PAIRINGS:
+                if team_seed == sa:
+                    r64_opp = sb
+                    break
+                elif team_seed == sb:
+                    r64_opp = sa
+                    break
+
+        # Win probability for this round
+        win_prob = 0.0
+        if from_round == "R64" and r64_opp is not None:
+            opp_tid = region_teams.get(r64_opp, 0)
+            opp_name = matcher.get_name(opp_tid) if opp_tid else f"Seed {r64_opp}"
+            win_prob = _get_pred(preds, team_id, opp_tid) if opp_tid else 0.5
+            print(f"  {display_name:<14} vs ({r64_opp:>2}) {opp_name}")
+            print(f"  {'':14} Win: {win_prob:.1%}")
+        else:
+            # Multiple possible opponents — show top candidates
+            opponents = []
+            for opp_s in opp_seed_list:
+                opp_tid = region_teams.get(opp_s, 0)
+                if opp_tid == 0:
+                    continue
+                opp_probs = region_probs.get(opp_tid, {})
+                opp_reach = opp_probs.get(from_round, 0.0)
+                if opp_reach < 0.01:
+                    continue
+                wp = _get_pred(preds, team_id, opp_tid)
+                opponents.append({
+                    "seed": opp_s,
+                    "name": matcher.get_name(opp_tid),
+                    "reach_prob": opp_reach,
+                    "win_prob": wp,
+                })
+
+            opponents.sort(key=lambda x: x["reach_prob"], reverse=True)
+
+            if opponents:
+                # Weighted win probability
+                total_opp_prob = sum(o["reach_prob"] for o in opponents)
+                if total_opp_prob > 0:
+                    win_prob = sum(
+                        o["reach_prob"] * o["win_prob"] for o in opponents
+                    ) / total_opp_prob
+
+                print(f"  {display_name:<14} Likely opponents:")
+                for o in opponents[:4]:
+                    bar = "█" * int(o["reach_prob"] * 20) + "░" * (20 - int(o["reach_prob"] * 20))
+                    print(f"  {'':14}  ({o['seed']:>2}) {o['name']:<18} {o['reach_prob']:>5.0%} chance  |  beat: {o['win_prob']:.0%}")
+                if len(opponents) > 4:
+                    print(f"  {'':14}  ... and {len(opponents) - 4} others")
+                print(f"  {'':14} Weighted win: {win_prob:.1%}")
+
+        cumulative *= win_prob
+        advance_prob = my_probs.get(to_round, cumulative)
+        print(f"  {'':14} Advance prob: {advance_prob:.1%}")
+        print()
+
+    # Final Four
+    if opposing_f4_region and opposing_f4_region in all_region_probs:
+        f4_reach = my_probs.get("F4", cumulative)
+        opp_region_probs = all_region_probs[opposing_f4_region]
+        opp_region_teams = bracket.get(opposing_f4_region, {})
+
+        f4_opponents = []
+        for opp_tid, oprobs in opp_region_probs.items():
+            opp_f4 = oprobs.get("F4", 0.0)
+            if opp_f4 < 0.01:
+                continue
+            wp = _get_pred(preds, team_id, opp_tid)
+            opp_s = get_seed(seeds, opp_tid, gender) or 0
+            f4_opponents.append({
+                "seed": opp_s,
+                "name": matcher.get_name(opp_tid),
+                "reach_prob": opp_f4,
+                "win_prob": wp,
+            })
+        f4_opponents.sort(key=lambda x: x["reach_prob"], reverse=True)
+
+        print(f"  {'Final Four':<14} vs Region {opposing_f4_region} champion:")
+        for o in f4_opponents[:4]:
+            print(f"  {'':14}  ({o['seed']:>2}) {o['name']:<18} {o['reach_prob']:>5.0%} chance  |  beat: {o['win_prob']:.0%}")
+
+        total_f4 = sum(o["reach_prob"] for o in f4_opponents)
+        if total_f4 > 0:
+            f4_win = sum(o["reach_prob"] * o["win_prob"] for o in f4_opponents) / total_f4
+            cumulative *= f4_win
+            print(f"  {'':14} Weighted win: {f4_win:.1%}")
+            print(f"  {'':14} Reach F4: {f4_reach:.1%} | Win F4: {f4_reach * f4_win:.1%}")
+            print()
+
+    # Championship
+    if championship_regions:
+        print(f"  {'Championship':<14} vs Region {'/'.join(championship_regions)} champion")
+        champ_opponents = []
+        for creg in championship_regions:
+            if creg in all_region_probs:
+                for opp_tid, oprobs in all_region_probs[creg].items():
+                    opp_f4 = oprobs.get("F4", 0.0)
+                    if opp_f4 < 0.01:
+                        continue
+                    wp = _get_pred(preds, team_id, opp_tid)
+                    opp_s = get_seed(seeds, opp_tid, gender) or 0
+                    champ_opponents.append({
+                        "seed": opp_s,
+                        "name": matcher.get_name(opp_tid),
+                        "reach_prob": opp_f4,
+                        "win_prob": wp,
+                        "region": creg,
+                    })
+        champ_opponents.sort(key=lambda x: x["reach_prob"], reverse=True)
+        for o in champ_opponents[:4]:
+            print(f"  {'':14}  ({o['seed']:>2}) {o['name']:<18} {o['reach_prob']:>5.0%} chance  |  beat: {o['win_prob']:.0%}")
+        total_ch = sum(o["reach_prob"] for o in champ_opponents)
+        if total_ch > 0:
+            ch_win = sum(o["reach_prob"] * o["win_prob"] for o in champ_opponents) / total_ch
+            print(f"  {'':14} Weighted win: {ch_win:.1%}")
+            cumulative *= ch_win
+        print()
+
+    # Futures comparison
+    fut = get_futures(futures_signals, team_id)
+    print(f"  ── Summary ──")
+    print(f"  Model championship prob:  {cumulative:.1%}")
+    if fut:
+        print(f"  Market championship prob: {fut['ChampionshipProb']:.1%}  (vol: ${fut['Volume']:,.0f})")
+    print(f"  {'=' * 66}")
+    print()
+
+
+# ── Matchup command ──────────────────────────────────────────────
 
 def predict_matchup(
     matcher: TeamMatcher,
@@ -122,7 +503,6 @@ def predict_matchup(
     name1 = matcher.get_name(id1)
     name2 = matcher.get_name(id2)
 
-    # Kaggle convention: lower ID is TeamA
     team_a, team_b = min(id1, id2), max(id1, id2)
     flipped = id1 != team_a
 
@@ -131,7 +511,6 @@ def predict_matchup(
 
     if row.empty:
         print(f"  No prediction found for {name1} vs {name2}")
-        print(f"  (Looked for ID: {match_id})")
         sys.exit(1)
 
     row = row.iloc[0]
@@ -185,15 +564,13 @@ def predict_matchup(
         print(f"  {name1:<25} {base_prob_1:>7.1%} {market_prob_1:>7.1%} {prob_1:>7.1%}")
         print(f"  {name2:<25} {1 - base_prob_1:>7.1%} {1 - market_prob_1:>7.1%} {1 - prob_1:>7.1%}")
         print(f"  Market source: {market_source} (confidence: {market_conf:.2f})")
-
         disagreement = abs(base_prob_1 - market_prob_1)
         if disagreement > 0.10:
             print(f"  ** Model/market disagree by {disagreement:.0%} — market may know something **")
         print()
 
     if verbose and not r1.empty and not r2.empty:
-        r1v = r1.iloc[0]
-        r2v = r2.iloc[0]
+        r1v, r2v = r1.iloc[0], r2.iloc[0]
         print(f"  ── Team Profiles ──")
         print(f"  {'':25} {name1:>12} {name2:>12}")
         print(f"  {'Elo':25} {r1v.get('EloPreTourney', 0):>12.0f} {r2v.get('EloPreTourney', 0):>12.0f}")
@@ -204,29 +581,23 @@ def predict_matchup(
         print(f"  {'Opp 3pt%':25} {r1v.get('Opp3PtPct', 0):>11.1%} {r2v.get('Opp3PtPct', 0):>11.1%}")
         print(f"  {'Off Reb Rate':25} {r1v.get('OffRebRate', 0):>11.1%} {r2v.get('OffRebRate', 0):>11.1%}")
         print(f"  {'Late FT%':25} {r1v.get('LateFTPct', 0):>11.1%} {r2v.get('LateFTPct', 0):>11.1%}")
-        massey1 = r1v.get("MasseyLogOdds", 0)
-        massey2 = r2v.get("MasseyLogOdds", 0)
+        massey1, massey2 = r1v.get("MasseyLogOdds", 0), r2v.get("MasseyLogOdds", 0)
         if massey1 != 0 or massey2 != 0:
             print(f"  {'Massey Log-Odds':25} {massey1:>12.2f} {massey2:>12.2f}")
         print()
 
-    f1 = get_futures(futures_signals, id1)
-    f2 = get_futures(futures_signals, id2)
+    f1, f2 = get_futures(futures_signals, id1), get_futures(futures_signals, id2)
     if f1 or f2:
         print(f"  ── Championship Futures ──")
-        if f1:
-            print(f"  {name1:<25} {f1['ChampionshipProb']:>6.1%} to win title  (vol: ${f1['Volume']:,.0f})")
-        else:
-            print(f"  {name1:<25} No futures market")
-        if f2:
-            print(f"  {name2:<25} {f2['ChampionshipProb']:>6.1%} to win title  (vol: ${f2['Volume']:,.0f})")
-        else:
-            print(f"  {name2:<25} No futures market")
+        for nm, f in [(name1, f1), (name2, f2)]:
+            if f:
+                print(f"  {nm:<25} {f['ChampionshipProb']:>6.1%} to win title  (vol: ${f['Volume']:,.0f})")
+            else:
+                print(f"  {nm:<25} No futures market")
         print()
 
     if seed1 and seed2:
-        s1 = int(seed1.strip("()"))
-        s2 = int(seed2.strip("()"))
+        s1, s2 = int(seed1.strip("()")), int(seed2.strip("()"))
         if s1 != s2:
             higher_seed_prob = prob_1 if s1 < s2 else (1 - prob_1)
             if higher_seed_prob < 0.50:
@@ -238,169 +609,171 @@ def predict_matchup(
     print()
 
 
-# ── Standard seed matchups by round ──────────────────────────
-# Maps (higher_seed, lower_seed) for typical tournament bracket pairings
-ROUND_MATCHUPS: dict[str, list[tuple[int, int]]] = {
-    "R64": [(1, 16), (2, 15), (3, 14), (4, 13), (5, 12), (6, 11), (7, 10), (8, 9)],
-    "R32": [(1, 8), (2, 7), (3, 6), (4, 5)],
-}
-
+# ── Upsets command ───────────────────────────────────────────────
 
 def find_upsets(
     matcher: TeamMatcher,
-    ratings: pd.DataFrame,
     preds: pd.DataFrame,
     seeds: pd.DataFrame,
-    futures_signals: pd.DataFrame,
     gender: str,
     filter_seed: int | None = None,
+    show_all: bool = False,
 ) -> None:
-    """Find and display the most likely upsets across tournament matchups."""
-    # Build seed lookup: (gender, seed_num) -> list of (team_id, region)
-    gender_seeds = seeds[seeds["Gender"] == gender]
-    if gender_seeds.empty:
-        print(f"  No seeds found for {'men' if gender == 'M' else 'women'}'s tournament")
+    """Find and display likely upsets — actual bracket matchups only (unless --all)."""
+    bracket = _build_bracket(seeds, gender)
+    if not bracket:
+        print(f"  No bracket found for {'men' if gender == 'M' else 'women'}'s tournament")
         return
-
-    seed_teams: dict[int, list[tuple[int, str]]] = {}
-    for _, row in gender_seeds.iterrows():
-        sn = int(row["SeedNum"])
-        tid = int(row["TeamID"])
-        region = str(row.get("Region", "?"))
-        seed_teams.setdefault(sn, []).append((tid, region))
 
     upsets: list[dict] = []
 
-    # Check all seed-vs-seed matchups
-    for round_name, matchup_pairs in ROUND_MATCHUPS.items():
-        for fav_seed, dog_seed in matchup_pairs:
-            if filter_seed is not None and dog_seed != filter_seed:
+    for region, region_teams in bracket.items():
+        # Only R64 matchups are guaranteed — the actual pairings
+        for fav_seed, dog_seed in R64_PAIRINGS:
+            if filter_seed is not None and filter_seed not in (fav_seed, dog_seed):
+                continue
+            fav_tid = region_teams.get(fav_seed)
+            dog_tid = region_teams.get(dog_seed)
+            if not fav_tid or not dog_tid:
                 continue
 
-            fav_teams = seed_teams.get(fav_seed, [])
-            dog_teams = seed_teams.get(dog_seed, [])
+            # Ensure fav is actually the higher seed (lower number)
+            if fav_seed > dog_seed:
+                fav_seed, dog_seed = dog_seed, fav_seed
+                fav_tid, dog_tid = dog_tid, fav_tid
 
-            for fav_id, fav_region in fav_teams:
-                for dog_id, dog_region in dog_teams:
-                    # In real brackets, only same-region matchups happen in R64/R32
-                    # but we show all possible for bracket planning
-                    ta, tb = min(fav_id, dog_id), max(fav_id, dog_id)
-                    match_id = f"{CFG.TARGET_SEASON}_{ta}_{tb}"
-                    row = preds[preds["ID"] == match_id]
-                    if row.empty:
-                        continue
+            dog_prob = _get_pred(preds, dog_tid, fav_tid)
+            if dog_prob < 0.02:
+                continue
 
-                    pred = float(row.iloc[0]["Pred"])
-                    base_pred = float(row.iloc[0]["BasePred"])
-                    # prob of lower-ID team winning
-                    # We need prob of the underdog (dog) winning
-                    if dog_id == ta:
-                        dog_prob = pred
-                        dog_base = base_pred
-                    else:
-                        dog_prob = 1 - pred
-                        dog_base = 1 - base_pred
+            upsets.append({
+                "round": "R64",
+                "region": region,
+                "fav_seed": fav_seed,
+                "dog_seed": dog_seed,
+                "fav_name": matcher.get_name(fav_tid),
+                "dog_name": matcher.get_name(dog_tid),
+                "dog_prob": dog_prob,
+            })
 
-                    # Only show if underdog has meaningful chance (>15%)
-                    if dog_prob < 0.15:
-                        continue
+        if show_all:
+            continue  # Skip R32 bracket logic for --all mode
 
-                    fav_name = matcher.get_name(fav_id)
-                    dog_name = matcher.get_name(dog_id)
+        # Also show R32 "expected" matchups (chalk opponents)
+        # R32 matchups: winner of each R64 pair plays the paired R64 winner
+        r32_seed_pairs = [
+            ((1, 16), (8, 9)),
+            ((4, 13), (5, 12)),
+            ((6, 11), (3, 14)),
+            ((7, 10), (2, 15)),
+        ]
+        for (fa, fb), (da, db) in r32_seed_pairs:
+            if filter_seed is not None and filter_seed not in (fa, fb, da, db):
+                continue
+            # Most likely R32 matchup is chalk (lower seed wins R64)
+            fav_seed_r32 = min(fa, fb)
+            dog_seed_r32 = min(da, db)
+            if fav_seed_r32 > dog_seed_r32:
+                fav_seed_r32, dog_seed_r32 = dog_seed_r32, fav_seed_r32
+                fa, fb, da, db = da, db, fa, fb
 
-                    # Market boost: how much does market like the underdog vs model?
-                    market_boost = dog_prob - dog_base
+            fav_tid = region_teams.get(min(fa, fb))
+            dog_tid = region_teams.get(min(da, db))
+            if not fav_tid or not dog_tid:
+                continue
 
-                    upsets.append({
-                        "round": round_name,
-                        "fav_seed": fav_seed,
-                        "dog_seed": dog_seed,
-                        "fav_name": fav_name,
-                        "dog_name": dog_name,
-                        "dog_prob": dog_prob,
-                        "dog_base": dog_base,
-                        "market_boost": market_boost,
-                        "fav_region": fav_region,
-                        "dog_region": dog_region,
-                    })
+            dog_prob = _get_pred(preds, dog_tid, fav_tid)
+            if dog_prob < 0.15:
+                continue
+
+            upsets.append({
+                "round": "R32",
+                "region": region,
+                "fav_seed": min(fa, fb),
+                "dog_seed": min(da, db),
+                "fav_name": matcher.get_name(fav_tid),
+                "dog_name": matcher.get_name(dog_tid),
+                "dog_prob": dog_prob,
+            })
 
     if not upsets:
-        print(f"  No upset candidates found" +
-              (f" for {filter_seed}-seeds" if filter_seed else ""))
+        seed_str = f" for {filter_seed}-seeds" if filter_seed else ""
+        print(f"  No upset candidates found{seed_str}")
         return
 
-    # Sort by underdog probability descending (most likely upsets first)
     upsets.sort(key=lambda x: x["dog_prob"], reverse=True)
 
     label = "Men's" if gender == "M" else "Women's"
-    title = f"{label} Upset Candidates"
+    title = f"{label} Upset Candidates — {'Actual Bracket' if not show_all else 'All Matchups'}"
     if filter_seed:
         title += f" — {filter_seed}-seeds"
 
     print()
-    print(f"  {'=' * 72}")
+    print(f"  {'=' * 74}")
     print(f"  {title}")
-    print(f"  {'=' * 72}")
+    print(f"  {'=' * 74}")
     print()
-    print(f"  {'Matchup':<40} {'Upset%':>7} {'Model':>7} {'Mkt Boost':>9} {'Round':>5}")
-    print(f"  {'-' * 72}")
+    print(f"  {'Matchup':<44} {'Upset%':>7} {'Region':>6} {'Round':>5}")
+    print(f"  {'-' * 74}")
 
     for u in upsets:
-        matchup_str = f"({u['dog_seed']:>2}) {u['dog_name']:<16} > ({u['fav_seed']:>2}) {u['fav_name']:<14}"
-        mkt = f"+{u['market_boost']:.0%}" if u["market_boost"] > 0.005 else (
-              f"{u['market_boost']:.0%}" if u["market_boost"] < -0.005 else "  --")
-
-        # Color coding via markers
+        matchup_str = f"({u['dog_seed']:>2}) {u['dog_name']:<18} > ({u['fav_seed']:>2}) {u['fav_name']:<16}"
         if u["dog_prob"] >= 0.50:
-            marker = " ***"  # Favored upset
+            marker = " ***"
         elif u["dog_prob"] >= 0.35:
-            marker = "  **"  # Strong upset candidate
+            marker = "  **"
         elif u["dog_prob"] >= 0.25:
-            marker = "   *"  # Worth considering
+            marker = "   *"
         else:
             marker = "    "
-
-        print(f"  {matchup_str:<40} {u['dog_prob']:>6.1%} {u['dog_base']:>6.1%} {mkt:>9} {u['round']:>5}{marker}")
+        print(f"  {matchup_str:<44} {u['dog_prob']:>6.1%} {u['region']:>6} {u['round']:>5}{marker}")
 
     print()
     print(f"  *** = model favors upset  ** = strong candidate  * = worth considering")
-    print(f"  Mkt Boost = how much market data shifts probability vs base model")
-    print(f"  {'=' * 72}")
+    print(f"  {'=' * 74}")
     print()
 
 
+# ── CLI entry point ──────────────────────────────────────────────
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="March Madness matchup predictor",
-        usage="mm-predict [-h] {TEAM1 TEAM2 | upsets [SEED]}",
-    )
-    # Check if first arg is "upsets" subcommand
-    if len(sys.argv) > 1 and sys.argv[1] == "upsets":
-        # Parse upsets subcommand
-        sub = argparse.ArgumentParser(
-            description="Show likely tournament upsets",
-            usage="mm-predict upsets [SEED] [-g M|W]",
-        )
-        sub.add_argument("_cmd", help=argparse.SUPPRESS)  # consume "upsets"
+    cmd = sys.argv[1] if len(sys.argv) > 1 else None
+
+    if cmd == "upsets":
+        sub = argparse.ArgumentParser(usage="mm-predict upsets [SEED] [-g M|W] [--all]")
+        sub.add_argument("_cmd", help=argparse.SUPPRESS)
         sub.add_argument("seed", nargs="?", type=int, default=None,
                          help="Filter to a specific seed (e.g., 12)")
-        sub.add_argument("-g", "--gender", default="M", choices=["M", "W"],
-                         help="M for men's (default), W for women's")
+        sub.add_argument("-g", "--gender", default="M", choices=["M", "W"])
+        sub.add_argument("--all", action="store_true",
+                         help="Show all possible matchups, not just actual bracket")
         args = sub.parse_args()
 
-        matcher, ratings, preds, seeds, market_signals, futures_signals = load_data()
-        find_upsets(matcher, ratings, preds, seeds, futures_signals, args.gender, args.seed)
+        matcher, ratings, preds, seeds, slots, market_signals, futures_signals = load_data()
+        find_upsets(matcher, preds, seeds, args.gender, args.seed, args.all)
+
+    elif cmd == "path":
+        sub = argparse.ArgumentParser(usage="mm-predict path TEAM [-g M|W]")
+        sub.add_argument("_cmd", help=argparse.SUPPRESS)
+        sub.add_argument("team", help="Team name")
+        sub.add_argument("-g", "--gender", default="M", choices=["M", "W"])
+        args = sub.parse_args()
+
+        matcher, ratings, preds, seeds, slots, market_signals, futures_signals = load_data()
+        show_path(matcher, preds, seeds, slots, futures_signals, args.team, args.gender)
+
     else:
-        # Parse matchup subcommand
+        parser = argparse.ArgumentParser(
+            description="March Madness matchup predictor",
+            usage="mm-predict {TEAM1 TEAM2 | path TEAM | upsets [SEED]}",
+        )
         parser.add_argument("team1", help="First team name")
         parser.add_argument("team2", help="Second team name")
-        parser.add_argument("-g", "--gender", default="M", choices=["M", "W"],
-                            help="M for men's (default), W for women's")
-        parser.add_argument("-v", "--verbose", action="store_true",
-                            help="Show detailed team profiles")
+        parser.add_argument("-g", "--gender", default="M", choices=["M", "W"])
+        parser.add_argument("-v", "--verbose", action="store_true")
         args = parser.parse_args()
 
-        matcher, ratings, preds, seeds, market_signals, futures_signals = load_data()
+        matcher, ratings, preds, seeds, slots, market_signals, futures_signals = load_data()
         predict_matchup(
             matcher, ratings, preds, seeds, market_signals, futures_signals,
             args.team1, args.team2, args.gender, args.verbose,
