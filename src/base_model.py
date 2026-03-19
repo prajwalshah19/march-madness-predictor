@@ -212,16 +212,19 @@ class MarchMadnessModel:
 
         seeds = loader.get_seeds()
 
-        # Build fast lookup dicts for ratings and seeds
-        ratings_idx = {}
-        for _, r in team_ratings.iterrows():
-            key = (int(r["Season"]), int(r["TeamID"]), r["Gender"])
-            ratings_idx[key] = r
+        # Build fast lookup dicts for ratings and seeds (vectorized construction)
+        ratings_idx = {
+            (int(s), int(t), g): r
+            for s, t, g, r in zip(
+                team_ratings["Season"], team_ratings["TeamID"],
+                team_ratings["Gender"], team_ratings.to_dict("records"),
+            )
+        }
 
-        seeds_idx = {}
-        for _, s in seeds.iterrows():
-            key = (int(s["Season"]), int(s["TeamID"]), s["Gender"])
-            seeds_idx[key] = int(s["SeedNum"])
+        seeds_idx = dict(zip(
+            zip(seeds["Season"].astype(int), seeds["TeamID"].astype(int), seeds["Gender"]),
+            seeds["SeedNum"].astype(int),
+        ))
 
         # Parse all IDs at once
         split = template["ID"].str.split("_", expand=True)
@@ -272,9 +275,8 @@ class MarchMadnessModel:
         preds = self.predict_proba(X)
 
         # Set invalid matchups to 0.5
-        for i, valid in enumerate(valid_mask):
-            if not valid:
-                preds[i] = 0.5
+        valid_arr = np.array(valid_mask)
+        preds[~valid_arr] = 0.5
 
         return pd.DataFrame({
             "ID": template["ID"].values,

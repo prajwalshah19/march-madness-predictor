@@ -82,20 +82,17 @@ def _compute_team_features(team_id: int, season_games: pd.DataFrame) -> dict:
     opp_3pt_pct = total_opp_fgm3 / total_opp_fga3 if total_opp_fga3 > 0 else 0.33
 
     # === 2. Turnover margin in close games (CloseGameTOMargin) ===
-    close_games_data = []
+    close_wins = wins[(wins["WScore"] - wins["LScore"]).abs() <= 5] if not wins.empty else wins
+    close_losses = losses[(losses["WScore"] - losses["LScore"]).abs() <= 5] if not losses.empty else losses
 
-    for _, g in wins.iterrows():
-        if abs(g["WScore"] - g["LScore"]) <= 5:
-            close_games_data.append(g["LTO"] - g["WTO"])  # opp TO - team TO
+    close_to_vals = pd.concat([
+        close_wins["LTO"] - close_wins["WTO"],    # opp TO - team TO
+        close_losses["WTO"] - close_losses["LTO"],
+    ]) if not (close_wins.empty and close_losses.empty) else pd.Series(dtype=float)
 
-    for _, g in losses.iterrows():
-        if abs(g["WScore"] - g["LScore"]) <= 5:
-            close_games_data.append(g["WTO"] - g["LTO"])  # opp TO - team TO
-
-    if len(close_games_data) >= 5:
-        close_to_margin = sum(close_games_data) / len(close_games_data)
+    if len(close_to_vals) >= 5:
+        close_to_margin = close_to_vals.mean()
     else:
-        # Fallback to overall TO margin
         team_to_total = wins["WTO"].sum() + losses["LTO"].sum()
         opp_to_total = wins["LTO"].sum() + losses["WTO"].sum()
         n_games = len(wins) + len(losses)

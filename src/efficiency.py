@@ -21,42 +21,45 @@ def _compute_game_stats(games: pd.DataFrame) -> pd.DataFrame:
     """Compute per-game efficiency stats from detailed results.
 
     Returns one row per team per game with offensive/defensive efficiency.
+    Fully vectorized — no Python loops.
     """
-    rows = []
-    for _, g in games.iterrows():
-        season = g["Season"]
-        day = g["DayNum"]
-        gender = g.get("Gender", "M")
+    # Possession estimates for both sides
+    w_poss = games["WFGA"] - games["WOR"] + games["WTO"] + CFG.FTA_COEFFICIENT * games["WFTA"]
+    l_poss = games["LFGA"] - games["LOR"] + games["LTO"] + CFG.FTA_COEFFICIENT * games["LFTA"]
+    avg_poss = (w_poss + l_poss) / 2.0
 
-        # Winner stats
-        w_poss = _compute_possessions(g["WFGA"], g["WOR"], g["WTO"], g["WFTA"])
-        l_poss = _compute_possessions(g["LFGA"], g["LOR"], g["LTO"], g["LFTA"])
+    # Filter out zero-possession games
+    valid = avg_poss > 0
+    g = games[valid]
+    ap = avg_poss[valid]
 
-        # Use average of both teams' possession estimates for consistency
-        avg_poss = (w_poss + l_poss) / 2.0
+    gender = g["Gender"] if "Gender" in g.columns else pd.Series("M", index=g.index)
 
-        if avg_poss > 0:
-            # Winner's efficiency
-            w_off_eff = g["WScore"] / avg_poss * 100
-            w_def_eff = g["LScore"] / avg_poss * 100
-            # Loser's efficiency
-            l_off_eff = g["LScore"] / avg_poss * 100
-            l_def_eff = g["WScore"] / avg_poss * 100
+    # Winner rows
+    winners = pd.DataFrame({
+        "Season": g["Season"].values,
+        "DayNum": g["DayNum"].values,
+        "Gender": gender.values,
+        "TeamID": g["WTeamID"].values,
+        "OppID": g["LTeamID"].values,
+        "OffEff": (g["WScore"].values / ap.values * 100),
+        "DefEff": (g["LScore"].values / ap.values * 100),
+        "Possessions": ap.values,
+    })
 
-            rows.append({
-                "Season": season, "DayNum": day, "Gender": gender,
-                "TeamID": g["WTeamID"], "OppID": g["LTeamID"],
-                "OffEff": w_off_eff, "DefEff": w_def_eff,
-                "Possessions": avg_poss,
-            })
-            rows.append({
-                "Season": season, "DayNum": day, "Gender": gender,
-                "TeamID": g["LTeamID"], "OppID": g["WTeamID"],
-                "OffEff": l_off_eff, "DefEff": l_def_eff,
-                "Possessions": avg_poss,
-            })
+    # Loser rows
+    losers = pd.DataFrame({
+        "Season": g["Season"].values,
+        "DayNum": g["DayNum"].values,
+        "Gender": gender.values,
+        "TeamID": g["LTeamID"].values,
+        "OppID": g["WTeamID"].values,
+        "OffEff": (g["LScore"].values / ap.values * 100),
+        "DefEff": (g["WScore"].values / ap.values * 100),
+        "Possessions": ap.values,
+    })
 
-    return pd.DataFrame(rows)
+    return pd.concat([winners, losers], ignore_index=True)
 
 
 def _get_recency_weights(day_nums: pd.Series) -> pd.Series:
@@ -69,7 +72,7 @@ def _get_recency_weights(day_nums: pd.Series) -> pd.Series:
     if day_range == 0:
         return pd.Series(1.0, index=day_nums.index)
     threshold = min_day + 0.7 * day_range
-    return day_nums.apply(lambda d: 1.5 if d >= threshold else 1.0)
+    return pd.Series(np.where(day_nums >= threshold, 1.5, 1.0), index=day_nums.index)
 
 
 def compute_efficiency(loader: DataLoader, elo_ratings: pd.DataFrame) -> pd.DataFrame:

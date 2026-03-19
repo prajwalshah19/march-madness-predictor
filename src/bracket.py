@@ -24,13 +24,13 @@ ROUND_NAMES = ["R64", "R32", "S16", "E8", "F4", "Championship", "Winner"]
 
 def _build_prediction_lookup(predictions: pd.DataFrame) -> dict[tuple[int, int], float]:
     """Build a fast lookup dict from predictions DataFrame. Key: (low_id, high_id) -> P(low wins)."""
-    lookup: dict[tuple[int, int], float] = {}
-    for _, row in predictions.iterrows():
-        parts = str(row["ID"]).split("_")
-        if len(parts) == 3:
-            low, high = int(parts[1]), int(parts[2])
-            lookup[(low, high)] = float(row["Pred"])
-    return lookup
+    split = predictions["ID"].str.split("_", expand=True)
+    if split.shape[1] < 3:
+        return {}
+    low = split[1].astype(int).values
+    high = split[2].astype(int).values
+    preds = predictions["Pred"].values
+    return {(int(low[i]), int(high[i])): float(preds[i]) for i in range(len(preds))}
 
 
 def _get_prediction_fast(
