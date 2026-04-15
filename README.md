@@ -8,7 +8,12 @@ A prediction pipeline for the Kaggle March Machine Learning Mania 2026 competiti
 
 ```bash
 # Install dependencies
-uv sync  # or pip install -r requirements.txt
+uv sync  # or: pip install .
+
+# Download Kaggle data (requires kaggle CLI)
+pip install kaggle  # or: uv sync --extra cli
+kaggle competitions download -c march-machine-learning-mania-2026
+unzip march-machine-learning-mania-2026.zip -d data/kaggle/
 
 # Run with cached artifacts (fast iteration)
 python main.py
@@ -22,7 +27,11 @@ python main.py --skip-brackets
 
 ### Market Integration (Optional)
 
-Set Kalshi API credentials in `.env`:
+Copy `.env.example` to `.env` and fill in your credentials:
+
+```bash
+cp .env.example .env
+```
 
 ```
 KALSHI_ACCESS_KEY=your-key-id

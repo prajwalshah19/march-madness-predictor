@@ -2,6 +2,7 @@
 name = "march-madness-predictor"
 version = "0.1.0"
 description = "March Madness tournament predictor"
+license = "MIT"
 requires-python = ">=3.13"
 dependencies = [
     "pandas>=2.0",
@@ -10,8 +11,17 @@ dependencies = [
     "requests>=2.31",
     "matplotlib>=3.7",
     "tqdm>=4.65",
-    "kaggle>=2.0.0",
+    "python-dotenv>=1.0",
+    "cryptography>=41.0",
 ]
+
+[project.optional-dependencies]
+cli = ["kaggle>=2.0.0"]
+dev = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["mm_predict"]
